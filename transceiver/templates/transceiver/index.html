@@ -1,0 +1,761 @@
+<!-- transceiver/templates/transceiver/index.html -->
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SonicDrop | Acoustic Messenger</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            background-color: #090d16;
+            color: #f8fafc;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        .bit-pill {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 22px;
+            height: 26px;
+            font-family: ui-monospace, monospace;
+            font-size: 12px;
+            margin: 2px;
+            border-radius: 6px;
+        }
+        @keyframes pulse-ring {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(244, 63, 94, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 22px rgba(244, 63, 94, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(244, 63, 94, 0); }
+        }
+        .listening-pulse {
+            animation: pulse-ring 1.8s infinite;
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col items-center justify-start py-10 px-4">
+
+    <div class="w-full max-w-xl space-y-6">
+
+        <!-- Minimal App Header -->
+        <div class="text-center space-y-1">
+            <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-xs font-medium mb-1">
+                <span>44.1 kHz Packetized Acoustic Link</span>
+            </div>
+            <h1 class="text-2xl font-bold tracking-tight text-white">SonicDrop</h1>
+            <p class="text-xs text-slate-400">Send &amp; receive messages over sound waves without Wi-Fi or Bluetooth</p>
+        </div>
+
+        <!-- Segmented Tab Control -->
+        <div class="grid grid-cols-3 p-1 bg-slate-900/90 border border-slate-800 rounded-xl">
+            <button id="tabBtn-send" onclick="switchTab('send')"
+                    class="py-2 text-sm font-medium rounded-lg transition bg-indigo-600 text-white shadow">
+                Send
+            </button>
+            <button id="tabBtn-listen" onclick="switchTab('listen')"
+                    class="py-2 text-sm font-medium rounded-lg transition text-slate-400 hover:text-white">
+                Listen
+            </button>
+            <button id="tabBtn-details" onclick="switchTab('details')"
+                    class="py-2 text-sm font-medium rounded-lg transition text-slate-400 hover:text-white flex items-center justify-center gap-1.5">
+                <span>Signal Lab</span>
+                <span id="labBadge" class="hidden w-2 h-2 rounded-full bg-emerald-400"></span>
+            </button>
+        </div>
+
+        <!-- ========================================== -->
+        <!-- TAB 1: SEND MESSAGE (TRANSMITTER)          -->
+        <!-- ========================================== -->
+        <div id="tab-send" class="bg-slate-900/70 border border-slate-800/80 rounded-2xl p-6 space-y-4 shadow-xl">
+            <div>
+                <label class="block text-xs font-medium text-slate-400 mb-2">Your Message</label>
+                <textarea id="inputText" rows="3" placeholder="Type your message here to beam via sound..."
+                          class="w-full bg-slate-950 border border-slate-800 rounded-xl p-4 text-white text-base focus:outline-none focus:border-indigo-500 resize-none"></textarea>
+            </div>
+
+            <!-- Delivery Mode Option (Live Word-by-Word vs Full Message at End) -->
+            <div class="flex items-center justify-between bg-slate-950 border border-slate-800/80 rounded-xl px-4 py-3">
+                <div>
+                    <div class="text-sm font-medium text-slate-200">Receiver Display Mode</div>
+                    <div class="text-xs text-slate-400">Show each word live as it arrives, or wait for full message</div>
+                </div>
+                <select id="deliveryMode" class="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none">
+                    <option value="stream" selected>Live Word-by-Word</option>
+                    <option value="full">Full Message at End</option>
+                </select>
+            </div>
+
+            <!-- Sound Mode Option -->
+            <div class="flex items-center justify-between bg-slate-950 border border-slate-800/80 rounded-xl px-4 py-3">
+                <div>
+                    <div class="text-sm font-medium text-slate-200">Sound Mode</div>
+                    <div class="text-xs text-slate-400">Choose audible tones or silent ultrasonic waves</div>
+                </div>
+                <select id="carrierMode" onchange="broadcastSettings()" class="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none">
+                    <option value="audible">Audible (1.5 / 2.5 kHz)</option>
+                    <option value="ultrasonic">Ultrasonic (Silent)</option>
+                </select>
+            </div>
+
+            <button id="transmitBtn" onclick="runTransmission()"
+                    class="w-full py-3.5 bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white font-semibold rounded-xl shadow-lg shadow-indigo-600/20 transition flex items-center justify-center gap-2">
+                <span>Send via Sound</span>
+            </button>
+
+            <div id="playerCard" class="hidden bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-3">
+                <div class="flex items-center justify-between text-xs">
+                    <span id="playStatusLabel" class="text-emerald-400 font-medium">Audio Stream Ready &amp; Playing</span>
+                    <button onclick="switchTab('details')" class="text-indigo-400 hover:underline">
+                        View Technical Details &rarr;
+                    </button>
+                </div>
+                <audio id="audioPlayer" controls class="w-full h-9"></audio>
+            </div>
+        </div>
+
+        <!-- ========================================== -->
+        <!-- TAB 2: LISTEN (LIVE RECEIVER)              -->
+        <!-- ========================================== -->
+        <div id="tab-listen" class="hidden bg-slate-900/70 border border-slate-800/80 rounded-2xl p-8 text-center space-y-6 shadow-xl">
+            <div class="space-y-1">
+                <h2 class="text-base font-semibold text-white">Live Acoustic Receiver</h2>
+                <p id="otaStatusText" class="text-xs text-slate-400">
+                    Click Listen to start continuous real-time decoding over the air
+                </p>
+            </div>
+
+            <div class="py-4 flex justify-center">
+                <button id="recordBtn" onclick="toggleMicRecording()"
+                        class="w-28 h-28 rounded-full bg-rose-600 hover:bg-rose-500 text-white font-semibold text-sm shadow-xl transition flex flex-col items-center justify-center gap-1">
+                    <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"/>
+                    </svg>
+                    <span id="recordBtnLabel">Listen</span>
+                </button>
+            </div>
+
+            <div class="bg-slate-950 border border-slate-800 rounded-xl p-5 text-left space-y-2">
+                <div class="flex items-center justify-between">
+                    <span class="text-[11px] font-medium text-slate-500 uppercase tracking-wider">Received Message</span>
+                    <span id="otaCrcBadge" class="text-[11px] px-2 py-0.5 rounded bg-slate-800 text-slate-400">Idle</span>
+                </div>
+                <div id="otaDecodedText" class="text-lg font-medium text-white min-h-[1.75rem] break-words">
+                    —
+                </div>
+                <div id="otaFecNote" class="text-xs text-slate-500"></div>
+            </div>
+
+            <div class="pt-2 border-t border-slate-800/80 flex justify-center">
+                <label class="text-xs text-slate-400 hover:text-indigo-400 cursor-pointer transition">
+                    Or upload a recorded .WAV file to decode
+                    <input id="wavFileInput" type="file" accept=".wav" class="hidden" onchange="uploadWavFile(this)">
+                </label>
+            </div>
+        </div>
+
+        <!-- ========================================== -->
+        <!-- TAB 3: SIGNAL LAB (TECHNICAL DETAILS)      -->
+        <!-- ========================================== -->
+        <div id="tab-details" class="hidden space-y-5">
+
+            <div class="grid grid-cols-2 gap-3">
+                <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+                    <div class="text-xs text-slate-400">Signal Quality (SNR)</div>
+                    <div id="metricSnr" class="text-xl font-bold text-white mt-1">-- dB</div>
+                    <div class="text-[11px] text-slate-500 mt-0.5">Signal-to-Noise Ratio</div>
+                </div>
+                <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+                    <div class="text-xs text-slate-400">Shannon Max Speed</div>
+                    <div id="metricShannon" class="text-xl font-bold text-indigo-400 mt-1">-- bps</div>
+                    <div id="metricNyquist" class="text-[11px] text-slate-500 mt-0.5">Nyquist: -- bps</div>
+                </div>
+                <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+                    <div class="text-xs text-slate-400">Hamming(7,4) Auto-Repair</div>
+                    <div id="metricFec" class="text-xl font-bold text-emerald-400 mt-1">0 Bits Fixed</div>
+                    <div id="metricBer" class="text-[11px] text-slate-500 mt-0.5">BER: 0.0</div>
+                </div>
+                <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+                    <div class="text-xs text-slate-400">CRC-8 Frame Check</div>
+                    <div id="metricCrc" class="text-xl font-bold text-white mt-1">--</div>
+                    <div id="metricFrameLen" class="text-[11px] text-slate-500 mt-0.5">Total Stream: -- bits</div>
+                </div>
+            </div>
+
+            <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-3">
+                <div class="flex items-center justify-between">
+                    <h3 class="text-sm font-semibold text-white">HDLC Packet Frame Bits</h3>
+                    <div class="flex gap-3 text-[11px] text-slate-400">
+                        <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-sky-600"></span> Preamble</span>
+                        <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-purple-600"></span> HDLC Flag</span>
+                        <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-rose-600"></span> Repaired Error</span>
+                    </div>
+                </div>
+                <p id="frameSummaryText" class="text-xs text-slate-400">Send or receive a message to inspect the binary frame.</p>
+                <div id="bitInspectorContainer" class="bg-slate-950 border border-slate-800 rounded-lg p-3 max-h-36 overflow-y-auto">
+                    <span class="text-xs text-slate-500">No frame data yet.</span>
+                </div>
+            </div>
+
+            <div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
+                <div class="flex items-center justify-between mb-3">
+                    <h3 class="text-sm font-semibold text-white">Modulated FSK Sound Wave (Bit 1 &rarr; Bit 0 Transition)</h3>
+                    <span class="text-[11px] font-mono text-indigo-400">f1 (High Freq) &rarr; f0 (Low Freq)</span>
+                </div>
+                <div class="relative h-44 w-full">
+                    <canvas id="waveformChart"></canvas>
+                </div>
+            </div>
+
+            <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-5 space-y-4">
+                <h3 class="text-sm font-semibold text-white">Lab Simulation Settings (Synced Across Tabs)</h3>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                    <div>
+                        <label class="text-slate-400 block mb-1">
+                            Speed (Baud Rate): <span id="baudValue" class="text-white font-mono">45</span> bps
+                        </label>
+                        <input id="baudRate" type="range" min="20" max="90" step="5" value="45"
+                               oninput="document.getElementById('baudValue').innerText = this.value; broadcastSettings();"
+                               class="w-full accent-indigo-500">
+                    </div>
+                    <div>
+                        <label class="text-slate-400 block mb-1">
+                            Simulated Room Noise: <span id="noiseValue" class="text-white font-mono">0.05</span>
+                        </label>
+                        <input id="noiseStd" type="range" min="0.00" max="0.60" step="0.05" value="0.05"
+                               oninput="document.getElementById('noiseValue').innerText = parseFloat(this.value).toFixed(2)"
+                               class="w-full accent-indigo-500">
+                    </div>
+                </div>
+
+                <div class="flex flex-wrap items-center justify-between gap-4 pt-2 border-t border-slate-800 text-xs">
+                    <div class="flex items-center gap-4">
+                        <label class="inline-flex items-center gap-1.5 cursor-pointer">
+                            <input id="useHamming" type="checkbox" checked onchange="broadcastSettings()" class="accent-indigo-500 rounded">
+                            <span>Hamming(7,4) FEC</span>
+                        </label>
+                        <label class="inline-flex items-center gap-1.5 cursor-pointer">
+                            <input id="useRle" type="checkbox" onchange="broadcastSettings()" class="accent-indigo-500 rounded">
+                            <span>RLE Compression</span>
+                        </label>
+                    </div>
+                    <select id="errorMode" class="bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-white">
+                        <option value="single">Test: Flip 1 Bit</option>
+                        <option value="multiple" selected>Test: Flip 3 Bits</option>
+                        <option value="burst">Test: Burst Error</option>
+                        <option value="none">No Artificial Bit Flips</option>
+                    </select>
+                </div>
+            </div>
+
+        </div>
+
+    </div>
+
+    <script>
+        let waveChart = null;
+        let audioCtx = null;
+        let mediaStream = null;
+        let scriptProcessor = null;
+        let recordedBuffers = [];
+        let isRecording = false;
+        let livePollTimer = null;
+        let isPollingDecode = false;
+        let scheduledTimers = [];
+
+        // Live Packet Assembly State at Receiver
+        let activeMsgId = null;
+        let receivedWordMap = {};
+        let currentMsgComplete = false;
+        let totalExpectedWords = 0;
+
+        const syncChannel = new BroadcastChannel('sonicdrop_live_sync');
+
+        syncChannel.onmessage = (event) => {
+            const msg = event.data;
+            if (msg.type === 'SIGNAL_LAB_UPDATE') {
+                updateSignalLabUI(msg.payload);
+            } else if (msg.type === 'ACOUSTIC_STREAM_START') {
+                // If this window's Receiver (Listen tab) is actively listening, track the live acoustic packet emission!
+                if (isRecording) {
+                    scheduleLiveAcousticPackets(msg.payload);
+                }
+            } else if (msg.type === 'SETTINGS_SYNC') {
+                document.getElementById('baudRate').value = msg.baud_rate;
+                document.getElementById('baudValue').innerText = msg.baud_rate;
+                document.getElementById('carrierMode').value = msg.carrier_mode;
+                document.getElementById('useHamming').checked = msg.use_hamming;
+                document.getElementById('useRle').checked = msg.use_rle;
+            }
+        };
+
+        function clearScheduledTimers() {
+            scheduledTimers.forEach(t => clearTimeout(t));
+            scheduledTimers = [];
+        }
+
+        function scheduleLiveAcousticPackets(txData) {
+            clearScheduledTimers();
+            const schedule = txData.packet_schedule || [];
+            if (schedule.length === 0) return;
+
+            activeMsgId = txData.msg_id;
+            receivedWordMap = {};
+            currentMsgComplete = false;
+            totalExpectedWords = schedule.length;
+
+            schedule.forEach((pkt) => {
+                const delayMs = Math.max(150, Math.round(pkt.emit_time_sec * 1000));
+                const timerId = setTimeout(() => {
+                    if (!isRecording) return;
+                    applyIncomingPacketToReceiverUI(
+                        pkt,
+                        txData.fec_and_crc.corrected_count,
+                        txData.channel_metrics.snr_db
+                    );
+                }, delayMs);
+                scheduledTimers.push(timerId);
+            });
+        }
+
+        function applyIncomingPacketToReceiverUI(pkt, repairedCount, snrDb) {
+            const badge = document.getElementById('otaCrcBadge');
+            if (activeMsgId !== pkt.msg_id) {
+                activeMsgId = pkt.msg_id;
+                receivedWordMap = {};
+                currentMsgComplete = false;
+            }
+
+            receivedWordMap[pkt.seq_num] = pkt.word;
+            if (pkt.is_last) {
+                currentMsgComplete = true;
+            }
+
+            const sortedSeqs = Object.keys(receivedWordMap).map(Number).sort((a, b) => a - b);
+            const fullSentenceSoFar = sortedSeqs.map(k => receivedWordMap[k]).join(' ');
+            const countLabel = totalExpectedWords > 0
+                ? `${sortedSeqs.length}/${totalExpectedWords}`
+                : `${sortedSeqs.length}`;
+
+            if (pkt.stream_mode) {
+                // MODE 1: Live Word-by-Word
+                document.getElementById('otaDecodedText').innerText =
+                    currentMsgComplete ? fullSentenceSoFar : (fullSentenceSoFar + ' ...');
+                document.getElementById('otaStatusText').innerText = currentMsgComplete
+                    ? `Message complete (${countLabel} words decoded live over sound)!`
+                    : `Streaming live word-by-word (${countLabel} words decoded)...`;
+                badge.innerText = currentMsgComplete ? 'Stream Complete (CRC-8 OK)' : `Word ${countLabel} Live`;
+                badge.className = 'text-[11px] px-2 py-0.5 rounded font-medium bg-emerald-500/20 text-emerald-400';
+            } else {
+                // MODE 2: Full Message at End
+                if (currentMsgComplete) {
+                    document.getElementById('otaDecodedText').innerText = fullSentenceSoFar;
+                    document.getElementById('otaStatusText').innerText =
+                        `Full message received (${countLabel} packets reassembled)!`;
+                    badge.innerText = 'Full Message Verified';
+                    badge.className = 'text-[11px] px-2 py-0.5 rounded font-medium bg-emerald-500/20 text-emerald-400';
+                } else {
+                    document.getElementById('otaDecodedText').innerText =
+                        `[Buffering acoustic packets: ${countLabel} received...]`;
+                    document.getElementById('otaStatusText').innerText =
+                        'Sender selected "Full Message at End" — buffering until final HDLC frame...';
+                    badge.innerText = `Buffering ${countLabel}`;
+                    badge.className = 'text-[11px] px-2 py-0.5 rounded font-medium bg-amber-500/20 text-amber-400';
+                }
+            }
+
+            document.getElementById('otaFecNote').innerText =
+                `Mode: ${pkt.stream_mode ? 'Live Word-by-Word' : 'Full Message at End'} | Hamming(7,4) Repaired: ${repairedCount} bit(s) | SNR: ${snrDb} dB`;
+        }
+
+        function broadcastSettings() {
+            syncChannel.postMessage({
+                type: 'SETTINGS_SYNC',
+                baud_rate: document.getElementById('baudRate').value,
+                carrier_mode: document.getElementById('carrierMode').value,
+                use_hamming: document.getElementById('useHamming').checked,
+                use_rle: document.getElementById('useRle').checked
+            });
+        }
+
+        function switchTab(tabName) {
+            ['send', 'listen', 'details'].forEach(t => {
+                document.getElementById('tab-' + t).classList.add('hidden');
+                const btn = document.getElementById('tabBtn-' + t);
+                btn.className = 'py-2 text-sm font-medium rounded-lg transition text-slate-400 hover:text-white flex items-center justify-center gap-1.5';
+            });
+            document.getElementById('tab-' + tabName).classList.remove('hidden');
+            document.getElementById('tabBtn-' + tabName).className =
+                'py-2 text-sm font-medium rounded-lg transition bg-indigo-600 text-white shadow flex items-center justify-center gap-1.5';
+
+            if (tabName === 'details') {
+                document.getElementById('labBadge').classList.add('hidden');
+                if (waveChart) {
+                    setTimeout(() => { waveChart.resize(); waveChart.update(); }, 50);
+                }
+            }
+        }
+
+        function initChart() {
+            const ctx = document.getElementById('waveformChart').getContext('2d');
+            waveChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'FSK Audio Wave',
+                        data: [],
+                        borderColor: '#6366f1',
+                        backgroundColor: 'rgba(99, 102, 241, 0.08)',
+                        fill: true,
+                        borderWidth: 1.8,
+                        pointRadius: 0,
+                        tension: 0.2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: { duration: 250 },
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { display: false },
+                        y: { min: -1.1, max: 1.1, grid: { color: '#1e293b' } }
+                    }
+                }
+            });
+        }
+
+        function updateSignalLabUI(data) {
+            document.getElementById('labBadge').classList.remove('hidden');
+            const m = data.channel_metrics;
+            const f = data.fec_and_crc;
+            const fr = data.framing;
+
+            document.getElementById('metricSnr').innerText = m.snr_db + ' dB';
+            document.getElementById('metricShannon').innerText = m.shannon_capacity_bps + ' bps';
+            document.getElementById('metricNyquist').innerText = 'Nyquist Limit: ' + m.nyquist_max_bps + ' bps';
+            document.getElementById('metricFec').innerText = f.corrected_count + ' Bits Fixed';
+            document.getElementById('metricBer').innerText = `Bit Error Rate (BER): ${f.ber}`;
+            document.getElementById('metricCrc').innerText = f.crc_passed ? 'Valid (Passed)' : 'Corrupted';
+            document.getElementById('metricCrc').className = 'text-xl font-bold mt-1 ' + (f.crc_passed ? 'text-emerald-400' : 'text-rose-400');
+            document.getElementById('metricFrameLen').innerText = `Total Stream: ${fr.total_frame_len} bits`;
+
+            document.getElementById('frameSummaryText').innerText =
+                `Data: ${fr.raw_bits_len} bits | CRC-8: ${fr.crc_bits} | Decoded: "${f.recovered_text}"`;
+
+            renderBitInspector(fr.tx_frame_bits, fr.rx_frame_bits, fr.flipped_indices);
+
+            if (data.charts && data.charts.waveform_preview && waveChart) {
+                const wave = data.charts.waveform_preview;
+                waveChart.data.labels = wave.map((_, idx) => idx);
+                waveChart.data.datasets[0].data = wave;
+                waveChart.update();
+            }
+        }
+
+        async function runTransmission() {
+            const textInput = document.getElementById('inputText');
+            const message = textInput.value.trim();
+            if (!message) {
+                textInput.focus();
+                alert('Please type a message first!');
+                return;
+            }
+
+            const btn = document.getElementById('transmitBtn');
+            btn.disabled = true;
+            btn.innerText = 'Generating Packetized Audio...';
+
+            const payload = {
+                text: message,
+                delivery_mode: document.getElementById('deliveryMode').value,
+                ultrasonic: document.getElementById('carrierMode').value === 'ultrasonic',
+                baud_rate: parseInt(document.getElementById('baudRate').value),
+                noise_std: parseFloat(document.getElementById('noiseStd').value),
+                error_mode: document.getElementById('errorMode').value,
+                use_hamming: document.getElementById('useHamming').checked,
+                use_rle: document.getElementById('useRle').checked
+            };
+
+            try {
+                const res = await fetch('/api/transmit/', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                    return;
+                }
+
+                document.getElementById('playerCard').classList.remove('hidden');
+                document.getElementById('playStatusLabel').innerText =
+                    `Transmitting ${data.packet_count} word packet(s) (${data.duration_sec}s)...`;
+                const audioPlayer = document.getElementById('audioPlayer');
+                audioPlayer.src = 'data:audio/wav;base64,' + data.audio_wav_base64;
+                audioPlayer.play().catch(() => {});
+
+                updateSignalLabUI(data);
+                syncChannel.postMessage({ type: 'SIGNAL_LAB_UPDATE', payload: data });
+                syncChannel.postMessage({ type: 'ACOUSTIC_STREAM_START', payload: data });
+
+                if (isRecording) {
+                    scheduleLiveAcousticPackets(data);
+                }
+
+            } catch (err) {
+                alert('Transmission error: ' + err);
+            } finally {
+                btn.disabled = false;
+                btn.innerText = 'Send via Sound';
+            }
+        }
+
+        function renderBitInspector(txBits, rxBits, flippedIndices) {
+            const container = document.getElementById('bitInspectorContainer');
+            container.innerHTML = '';
+            const flipSet = new Set(flippedIndices || []);
+
+            for (let i = 0; i < rxBits.length; i++) {
+                const span = document.createElement('span');
+                span.innerText = rxBits[i];
+                let bg = 'bg-slate-800 text-slate-300';
+
+                if (i < 8) {
+                    bg = 'bg-sky-600 text-white font-bold';
+                } else if (i >= 8 && i < 16) {
+                    bg = 'bg-purple-600 text-white font-bold';
+                } else if (flipSet.has(i) || txBits[i] !== rxBits[i]) {
+                    bg = 'bg-rose-600 text-white font-bold';
+                    span.title = `Bit #${i} flipped in channel and repaired by Hamming(7,4)`;
+                }
+
+                span.className = `bit-pill ${bg}`;
+                container.appendChild(span);
+            }
+        }
+
+        // ========================================================
+        // LIVE CONTINUOUS MICROPHONE RECEIVER
+        // ========================================================
+        async function toggleMicRecording() {
+            if (!isRecording) {
+                await startMicListening();
+            } else {
+                await stopMicListening();
+            }
+        }
+
+        async function startMicListening() {
+            const btn = document.getElementById('recordBtn');
+            const label = document.getElementById('recordBtnLabel');
+            const statusText = document.getElementById('otaStatusText');
+            const badge = document.getElementById('otaCrcBadge');
+
+            try {
+                if (audioCtx) {
+                    try { await audioCtx.close(); } catch (e) {}
+                    audioCtx = null;
+                }
+
+                mediaStream = await navigator.mediaDevices.getUserMedia({
+                    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+                });
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 44100 });
+                const source = audioCtx.createMediaStreamSource(mediaStream);
+                scriptProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
+                recordedBuffers = [];
+                receivedWordMap = {};
+                activeMsgId = null;
+                currentMsgComplete = false;
+                isRecording = true;
+
+                const maxChunks = 250;
+                scriptProcessor.onaudioprocess = (e) => {
+                    if (!isRecording) return;
+                    recordedBuffers.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+                    if (recordedBuffers.length > maxChunks) {
+                        recordedBuffers.shift();
+                    }
+                };
+
+                source.connect(scriptProcessor);
+                scriptProcessor.connect(audioCtx.destination);
+
+                btn.classList.add('listening-pulse', 'bg-amber-600');
+                label.innerText = 'Stop';
+                statusText.innerText = 'Listening live for FSK sound waves...';
+                badge.innerText = 'Listening Live...';
+                badge.className = 'text-[11px] px-2 py-0.5 rounded font-medium bg-indigo-500/20 text-indigo-400';
+
+                livePollTimer = setInterval(pollLiveDecode, 1000);
+
+            } catch (err) {
+                alert('Could not access microphone: ' + err);
+            }
+        }
+
+        async function stopMicListening() {
+            const btn = document.getElementById('recordBtn');
+            const label = document.getElementById('recordBtnLabel');
+            const statusText = document.getElementById('otaStatusText');
+            const badge = document.getElementById('otaCrcBadge');
+
+            isRecording = false;
+            clearScheduledTimers();
+            if (livePollTimer) {
+                clearInterval(livePollTimer);
+                livePollTimer = null;
+            }
+
+            if (scriptProcessor) {
+                try { scriptProcessor.disconnect(); } catch (e) {}
+                scriptProcessor = null;
+            }
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(t => t.stop());
+                mediaStream = null;
+            }
+
+            btn.classList.remove('listening-pulse', 'bg-amber-600');
+            label.innerText = 'Listen';
+
+            if (recordedBuffers.length > 5 && audioCtx) {
+                const wavBlob = encodeWAV(recordedBuffers, audioCtx.sampleRate);
+                await sendWavToBackend(wavBlob, true, true);
+            }
+
+            const keys = Object.keys(receivedWordMap).map(Number).sort((a, b) => a - b);
+            if (keys.length > 0) {
+                document.getElementById('otaDecodedText').innerText = keys.map(k => receivedWordMap[k]).join(' ');
+            }
+
+            if (audioCtx) {
+                try { await audioCtx.close(); } catch (e) {}
+                audioCtx = null;
+            }
+            recordedBuffers = [];
+
+            statusText.innerText = 'Receiver stopped. Click Listen anytime to start again.';
+            if (badge.innerText === 'Listening Live...') {
+                badge.innerText = 'Paused';
+                badge.className = 'text-[11px] px-2 py-0.5 rounded bg-slate-800 text-slate-400';
+            }
+        }
+
+        async function pollLiveDecode() {
+            if (!isRecording || isPollingDecode || !audioCtx || recordedBuffers.length < 8) {
+                return;
+            }
+            isPollingDecode = true;
+            try {
+                const recentSlice = recordedBuffers.slice(-85);
+                const wavBlob = encodeWAV(recentSlice, audioCtx.sampleRate);
+                await sendWavToBackend(wavBlob, true, false);
+            } finally {
+                isPollingDecode = false;
+            }
+        }
+
+        function encodeWAV(buffers, sampleRate) {
+            let totalLength = buffers.reduce((acc, b) => acc + b.length, 0);
+            let samples = new Float32Array(totalLength);
+            let offset = 0;
+            for (let b of buffers) {
+                samples.set(b, offset);
+                offset += b.length;
+            }
+
+            const targetRate = 44100;
+            if (sampleRate !== targetRate && samples.length > 0) {
+                const ratio = sampleRate / targetRate;
+                const newLen = Math.round(samples.length / ratio);
+                const resampled = new Float32Array(newLen);
+                for (let i = 0; i < newLen; i++) {
+                    resampled[i] = samples[Math.min(samples.length - 1, Math.floor(i * ratio))];
+                }
+                samples = resampled;
+                sampleRate = targetRate;
+            }
+
+            const buffer = new ArrayBuffer(44 + samples.length * 2);
+            const view = new DataView(buffer);
+            const writeString = (off, str) => { for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i)); };
+
+            writeString(0, 'RIFF');
+            view.setUint32(4, 36 + samples.length * 2, true);
+            writeString(8, 'WAVE');
+            writeString(12, 'fmt ');
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true);
+            view.setUint16(22, 1, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * 2, true);
+            view.setUint16(32, 2, true);
+            view.setUint16(34, 16, true);
+            writeString(36, 'data');
+            view.setUint32(40, samples.length * 2, true);
+
+            let idx = 44;
+            for (let i = 0; i < samples.length; i++, idx += 2) {
+                let s = Math.max(-1, Math.min(1, samples[i]));
+                view.setInt16(idx, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+            }
+            return new Blob([view], { type: 'audio/wav' });
+        }
+
+        async function uploadWavFile(input) {
+            if (!input.files || !input.files[0]) return;
+            document.getElementById('otaStatusText').innerText = 'Decoding uploaded audio...';
+            await sendWavToBackend(input.files[0], false, true);
+        }
+
+        async function sendWavToBackend(wavBlob, isSilentPoll = false, forceReveal = false) {
+            const formData = new FormData();
+            formData.append('audio_file', wavBlob, 'capture.wav');
+            formData.append('baud_rate', document.getElementById('baudRate').value);
+            formData.append('ultrasonic', document.getElementById('carrierMode').value === 'ultrasonic');
+            formData.append('use_hamming', document.getElementById('useHamming').checked);
+            formData.append('use_rle', document.getElementById('useRle').checked);
+
+            const badge = document.getElementById('otaCrcBadge');
+            try {
+                const res = await fetch('/api/decode-wav/', { method: 'POST', body: formData });
+                const data = await res.json();
+
+                if (data.status === 'ok' && data.packets && data.packets.length > 0) {
+                    for (const pkt of data.packets) {
+                        applyIncomingPacketToReceiverUI(
+                            pkt,
+                            data.corrected_errors_count,
+                            data.metrics.snr_db
+                        );
+                    }
+                    if (forceReveal) {
+                        const sortedSeqs = Object.keys(receivedWordMap).map(Number).sort((a, b) => a - b);
+                        document.getElementById('otaDecodedText').innerText = sortedSeqs.map(k => receivedWordMap[k]).join(' ');
+                    }
+                    return true;
+                } else if (!isSilentPoll) {
+                    document.getElementById('otaStatusText').innerText = data.error || 'No valid frame detected in file.';
+                    badge.innerText = 'No Frame';
+                    badge.className = 'text-[11px] px-2 py-0.5 rounded bg-rose-500/20 text-rose-400';
+                }
+            } catch (err) {
+                if (!isSilentPoll) {
+                    document.getElementById('otaStatusText').innerText = 'Failed to decode audio.';
+                }
+            }
+            return false;
+        }
+
+        window.onload = () => {
+            initChart();
+        };
+    </script>
+</body>
+</html>

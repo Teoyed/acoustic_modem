@@ -1,19 +1,17 @@
 # transceiver/engine/channel_coding.py
 import random
 
+
 class ChannelCoder:
     """
     Channel Coding and Data Link Layer Framing module.
     Includes CRC-8 error detection, Hamming(7,4) Forward Error Correction (FEC),
-    HDLC framing with bit stuffing, and channel error injection.
+    HDLC framing with bit stuffing, packet sequence headers, and error injection.
     """
     PREAMBLE = "10101010"      # 1-byte alternating preamble for receiver synchronization
     HDLC_FLAG = "01111110"     # Standard HDLC frame delimiter flag (0x7E)
     CRC8_POLY = "100000111"    # Standard CRC-8 generator polynomial (x^8 + x^2 + x + 1)
 
-    # ==========================================
-    # 1. Cyclic Redundancy Check (CRC)
-    # ==========================================
     @staticmethod
     def _xor(a: str, b: str) -> str:
         """Perform bitwise XOR between two equal-length bit strings (excluding MSB)."""
@@ -50,9 +48,6 @@ class ChannelCoder:
         remainder = cls.compute_crc(data_with_crc, polynomial)
         return set(remainder) == {'0'}
 
-    # ==========================================
-    # 2. Forward Error Correction: Hamming(7,4)
-    # ==========================================
     @staticmethod
     def hamming74_encode(data_bits: str) -> str:
         """
@@ -77,7 +72,6 @@ class ChannelCoder:
     def hamming74_decode(encoded_bits: str) -> dict:
         """
         Decode Hamming(7,4) codewords and automatically correct single-bit errors per block.
-        Returns the decoded payload bits and metadata of all corrected bit positions.
         """
         decoded_data = []
         corrected_positions = []
@@ -88,12 +82,10 @@ class ChannelCoder:
             block = [int(b) for b in encoded_bits[i:i+7]]
             b1, b2, b3, b4, b5, b6, b7 = block
 
-            # Calculate 3-bit syndrome (s4, s2, s1)
             s1 = b1 ^ b3 ^ b5 ^ b7
             s2 = b2 ^ b3 ^ b6 ^ b7
             s4 = b4 ^ b5 ^ b6 ^ b7
 
-            # 1-based index of the corrupted bit within the 7-bit block (0 means no error)
             error_pos = (s4 << 2) | (s2 << 1) | s1
 
             if error_pos != 0:
@@ -106,10 +98,8 @@ class ChannelCoder:
                     "flipped_from": block[error_pos - 1],
                     "corrected_to": 1 - block[error_pos - 1]
                 })
-                # Flip the corrupted bit back to its original value (FEC)
                 block[error_pos - 1] ^= 1
 
-            # Extract the 4 original data bits at indices 2, 4, 5, 6
             decoded_data.append(f"{block[2]}{block[4]}{block[5]}{block[6]}")
 
         return {
@@ -118,9 +108,6 @@ class ChannelCoder:
             "corrected_positions": corrected_positions
         }
 
-    # ==========================================
-    # 3. HDLC Framing and Bit Stuffing
-    # ==========================================
     @staticmethod
     def bit_stuff(bits: str) -> str:
         """Insert a '0' bit after every 5 consecutive '1' bits to prevent false flag detection."""
@@ -157,15 +144,45 @@ class ChannelCoder:
             i += 1
         return ''.join(unstuffed)
 
+    @staticmethod
+    def pack_packet_header(
+        msg_id: int,
+        seq_num: int,
+        is_last: bool,
+        stream_mode: bool
+    ) -> str:
+        """
+        Build a 12-bit Data Link packet header:
+        - Bits 0..2 (3 bits) : Message Session ID (0..7)
+        - Bit 3     (1 bit)  : Delivery Mode (1 = Live Word-by-Word, 0 = Full Message at End)
+        - Bit 4     (1 bit)  : Last Packet Flag (1 = Final word frame, 0 = More frames follow)
+        - Bits 5..11(7 bits) : Sequence Number (0..127)
+        """
+        msg_id_bits = f"{msg_id & 0x07:03b}"
+        mode_bit = '1' if stream_mode else '0'
+        last_bit = '1' if is_last else '0'
+        seq_bits = f"{seq_num & 0x7F:07b}"
+        return f"{msg_id_bits}{mode_bit}{last_bit}{seq_bits}"
+
+    @staticmethod
+    def unpack_packet_header(payload_bits: str) -> dict:
+        """Extract the 12-bit packet header and remaining word bits."""
+        if len(payload_bits) < 20:
+            return {"valid": False}
+        header = payload_bits[:12]
+        content_bits = payload_bits[12:]
+        return {
+            "valid": True,
+            "msg_id": int(header[0:3], 2),
+            "stream_mode": header[3] == '1',
+            "is_last": header[4] == '1',
+            "seq_num": int(header[5:12], 2),
+            "content_bits": content_bits
+        }
+
     @classmethod
     def build_frame(cls, payload_bits: str, use_hamming: bool = True) -> dict:
-        """
-        Construct a complete Data Link Layer frame:
-        1. Compute and append CRC-8 (FCS) to payload
-        2. Encode with Hamming(7,4) if enabled
-        3. Apply HDLC bit stuffing
-        4. Prepend Preamble + Start Flag and append End Flag
-        """
+        """Construct a complete Data Link Layer frame with CRC-8, Hamming(7,4), and HDLC flags."""
         crc = cls.compute_crc(payload_bits)
         data_with_crc = payload_bits + crc
 
@@ -188,59 +205,84 @@ class ChannelCoder:
         }
 
     @classmethod
-    def parse_frame(cls, received_frame_bits: str, use_hamming: bool = True) -> dict:
+    def parse_all_frames(cls, received_frame_bits: str, use_hamming: bool = True) -> list[dict]:
         """
-        Parse a received frame stream:
-        Locate HDLC flags, unstuff bits, apply Hamming(7,4) error correction, and verify CRC-8.
+        Scan a bit stream and extract all HDLC frames between 01111110 flags.
+        Prioritizes CRC-verified frames and retains best-effort FEC frames as fallback.
         """
-        first_flag = received_frame_bits.find(cls.HDLC_FLAG)
-        if first_flag == -1:
-            return {"valid_frame": False, "error": "HDLC start flag (01111110) not found."}
+        flag = cls.HDLC_FLAG
+        flag_len = len(flag)
+        flag_positions = []
+        pos = received_frame_bits.find(flag)
+        while pos != -1:
+            flag_positions.append(pos)
+            pos = received_frame_bits.find(flag, pos + flag_len)
 
-        body_start = first_flag + len(cls.HDLC_FLAG)
-        second_flag = received_frame_bits.find(cls.HDLC_FLAG, body_start)
-        if second_flag == -1:
-            return {"valid_frame": False, "error": "HDLC end flag (01111110) not found."}
+        if len(flag_positions) < 2:
+            return []
 
-        stuffed_body = received_frame_bits[body_start:second_flag]
-        protected_bits = cls.bit_unstuff(stuffed_body)
-
-        corrected_info = []
-        if use_hamming:
-            hamming_res = cls.hamming74_decode(protected_bits)
-            data_with_crc = hamming_res["decoded_bits"]
-            corrected_info = hamming_res["corrected_positions"]
-        else:
-            data_with_crc = protected_bits
-
+        valid_frames = []
+        fallback_frames = []
         crc_len = len(cls.CRC8_POLY) - 1
-        if len(data_with_crc) < crc_len:
-            return {"valid_frame": False, "error": "Frame payload is shorter than CRC length."}
+        used_up_to = -1
 
-        crc_ok = cls.verify_crc(data_with_crc)
-        payload_bits = data_with_crc[:-crc_len]
-        extracted_crc = data_with_crc[-crc_len:]
+        for idx in range(len(flag_positions) - 1):
+            if flag_positions[idx] < used_up_to:
+                continue
+            body_start = flag_positions[idx] + flag_len
 
-        return {
-            "valid_frame": True,
-            "crc_passed": crc_ok,
-            "payload_bits": payload_bits,
-            "extracted_crc": extracted_crc,
-            "corrected_errors_count": len(corrected_info),
-            "corrected_positions": corrected_info
-        }
+            for end_idx in range(idx + 1, min(idx + 4, len(flag_positions))):
+                body_end = flag_positions[end_idx]
+                stuffed_body = received_frame_bits[body_start:body_end]
+                if len(stuffed_body) < 28:
+                    continue
 
-    # ==========================================
-    # 4. Channel Error Simulator
-    # ==========================================
+                protected_bits = cls.bit_unstuff(stuffed_body)
+                if use_hamming:
+                    hamming_res = cls.hamming74_decode(protected_bits)
+                    data_with_crc = hamming_res["decoded_bits"]
+                    corrected_info = hamming_res["corrected_positions"]
+                else:
+                    data_with_crc = protected_bits
+                    corrected_info = []
+
+                if len(data_with_crc) < crc_len + 20:
+                    continue
+
+                crc_ok = cls.verify_crc(data_with_crc)
+                payload_bits = data_with_crc[:-crc_len]
+                extracted_crc = data_with_crc[-crc_len:]
+
+                candidate = {
+                    "valid_frame": True,
+                    "crc_passed": crc_ok,
+                    "payload_bits": payload_bits,
+                    "extracted_crc": extracted_crc,
+                    "corrected_errors_count": len(corrected_info),
+                    "corrected_positions": corrected_info,
+                    "matched_frame_bits": received_frame_bits[max(0, flag_positions[idx] - 8):body_end + flag_len]
+                }
+
+                if crc_ok:
+                    valid_frames.append(candidate)
+                    used_up_to = body_end
+                    break
+                else:
+                    fallback_frames.append(candidate)
+
+        return valid_frames if valid_frames else fallback_frames[:1]
+
+    @classmethod
+    def parse_frame(cls, received_frame_bits: str, use_hamming: bool = True) -> dict:
+        """Parse the first valid HDLC frame from a bit stream."""
+        frames = cls.parse_all_frames(received_frame_bits, use_hamming=use_hamming)
+        if frames:
+            return frames[0]
+        return {"valid_frame": False, "error": "HDLC frame flags (01111110) not found."}
+
     @staticmethod
     def inject_channel_error(bits: str, mode: str = "single", burst_len: int = 3) -> tuple[str, list[int]]:
-        """
-        Inject simulated transmission errors into a bit sequence:
-        - 'single': Flip 1 random bit
-        - 'multiple': Flip 1 bit in multiple separate 7-bit blocks
-        - 'burst': Flip a contiguous sequence of bits of length `burst_len`
-        """
+        """Inject simulated transmission errors into a bit sequence."""
         bit_list = list(bits)
         flipped_indices = []
         n = len(bit_list)
@@ -251,13 +293,11 @@ class ChannelCoder:
             idx = random.randint(0, n - 1)
             bit_list[idx] = '1' if bit_list[idx] == '0' else '0'
             flipped_indices.append(idx)
-
         elif mode == "multiple":
             for block_start in range(0, min(n - 7, 21), 7):
                 idx = block_start + random.randint(0, 6)
                 bit_list[idx] = '1' if bit_list[idx] == '0' else '0'
                 flipped_indices.append(idx)
-
         elif mode == "burst":
             start_idx = random.randint(0, max(0, n - burst_len))
             for idx in range(start_idx, min(n, start_idx + burst_len)):
