@@ -50,11 +50,7 @@ class ChannelCoder:
 
     @staticmethod
     def hamming74_encode(data_bits: str) -> str:
-        """
-        Encode data bits using Hamming(7,4) block code.
-        Maps every 4 data bits (d1, d2, d3, d4) to a 7-bit codeword:
-        [p1, p2, d1, p4, d2, d3, d4]
-        """
+        """Encode data bits using Hamming(7,4) block code."""
         pad_len = (4 - (len(data_bits) % 4)) % 4
         padded_bits = data_bits + ('0' * pad_len)
 
@@ -70,9 +66,7 @@ class ChannelCoder:
 
     @staticmethod
     def hamming74_decode(encoded_bits: str) -> dict:
-        """
-        Decode Hamming(7,4) codewords and automatically correct single-bit errors per block.
-        """
+        """Decode Hamming(7,4) codewords and automatically correct single-bit errors per block."""
         decoded_data = []
         corrected_positions = []
         blocks_with_error = 0
@@ -151,13 +145,7 @@ class ChannelCoder:
         is_last: bool,
         stream_mode: bool
     ) -> str:
-        """
-        Build a 12-bit Data Link packet header:
-        - Bits 0..2 (3 bits) : Message Session ID (0..7)
-        - Bit 3     (1 bit)  : Delivery Mode (1 = Live Word-by-Word, 0 = Full Message at End)
-        - Bit 4     (1 bit)  : Last Packet Flag (1 = Final word frame, 0 = More frames follow)
-        - Bits 5..11(7 bits) : Sequence Number (0..127)
-        """
+        """Build a 12-bit Data Link packet header."""
         msg_id_bits = f"{msg_id & 0x07:03b}"
         mode_bit = '1' if stream_mode else '0'
         last_bit = '1' if is_last else '0'
@@ -166,17 +154,24 @@ class ChannelCoder:
 
     @staticmethod
     def unpack_packet_header(payload_bits: str) -> dict:
-        """Extract the 12-bit packet header and remaining word bits."""
+        """Extract and validate the 12-bit packet header and remaining word bits."""
         if len(payload_bits) < 20:
             return {"valid": False}
         header = payload_bits[:12]
         content_bits = payload_bits[12:]
+        msg_id = int(header[0:3], 2)
+        seq_num = int(header[5:12], 2)
+
+        # Reject random noise headers with out-of-range IDs or sequence numbers
+        if msg_id == 0 or seq_num > 64:
+            return {"valid": False}
+
         return {
             "valid": True,
-            "msg_id": int(header[0:3], 2),
+            "msg_id": msg_id,
             "stream_mode": header[3] == '1',
             "is_last": header[4] == '1',
-            "seq_num": int(header[5:12], 2),
+            "seq_num": seq_num,
             "content_bits": content_bits
         }
 
@@ -218,11 +213,7 @@ class ChannelCoder:
 
     @classmethod
     def build_shared_flag_stream(cls, payloads: list[str], use_hamming: bool = True) -> dict:
-        """
-        Build a high-efficiency back-to-back HDLC frame stream using Flag Sharing:
-        PREAMBLE + FLAG + Body_1 + FLAG + Body_2 + FLAG + ... + Body_N + FLAG
-        Eliminates redundant preambles and duplicate flags between consecutive words.
-        """
+        """Build a back-to-back HDLC frame stream using Flag Sharing."""
         bodies = []
         cumulative_bits = []
         current_len = len(cls.PREAMBLE) + len(cls.HDLC_FLAG)
@@ -248,10 +239,16 @@ class ChannelCoder:
         }
 
     @classmethod
-    def parse_all_frames(cls, received_frame_bits: str, use_hamming: bool = True) -> list[dict]:
+    def parse_all_frames(
+        cls,
+        received_frame_bits: str,
+        use_hamming: bool = True,
+        strict_crc: bool = True
+    ) -> list[dict]:
         """
-        Scan a bit stream and extract all HDLC frames between 01111110 flags
-        (supports both standalone frames and shared-flag back-to-back streams).
+        Scan a bit stream and extract HDLC frames between 01111110 flags.
+        When strict_crc=True (default), frames failing CRC-8 are strictly discarded
+        so ambient noise never produces garbage text.
         """
         flag = cls.HDLC_FLAG
         flag_len = len(flag)
@@ -310,15 +307,17 @@ class ChannelCoder:
                     valid_frames.append(candidate)
                     used_up_to = body_end
                     break
-                else:
+                elif not strict_crc:
                     fallback_frames.append(candidate)
 
-        return valid_frames if valid_frames else fallback_frames[:1]
+        if valid_frames:
+            return valid_frames
+        return [] if strict_crc else fallback_frames[:1]
 
     @classmethod
     def parse_frame(cls, received_frame_bits: str, use_hamming: bool = True) -> dict:
-        """Parse the first valid HDLC frame from a bit stream."""
-        frames = cls.parse_all_frames(received_frame_bits, use_hamming=use_hamming)
+        """Parse the first HDLC frame from a bit stream (allows inspection in Signal Lab)."""
+        frames = cls.parse_all_frames(received_frame_bits, use_hamming=use_hamming, strict_crc=False)
         if frames:
             return frames[0]
         return {"valid_frame": False, "error": "HDLC frame flags (01111110) not found."}

@@ -8,9 +8,9 @@ from .channel_coding import ChannelCoder
 
 class AcousticModemPHY:
     """
-    Physical Layer (PHY) Acoustic Modem.
-    Supports both Binary FSK (2-FSK, M=2, 1 bit/symbol) and
-    Quadrature/4-Level FSK (4-FSK, M=4, 2 bits/symbol) for high-speed transmission.
+    Noise-Immune Physical Layer (PHY) Acoustic Modem.
+    Uses a High-Clarity Audible Band (4.2 kHz - 6.0 kHz) above human speech,
+    FFT Band-Pass Filtering, and a Spectral Tone-Dominance Gate to reject room noise.
     """
 
     SYMBOL_BITS_4FSK = ("00", "01", "10", "11")
@@ -29,35 +29,54 @@ class AcousticModemPHY:
         self.bits_per_symbol = int(math.log2(self.levels_m))
         self.bit_rate_bps = self.baud_rate * self.bits_per_symbol
 
+        # High-Clarity Anti-Noise Carrier Frequencies (Far above human voice < 3.2 kHz)
         if self.levels_m == 4:
             if ultrasonic:
                 self.frequencies = [16800.0, 17400.0, 18000.0, 18600.0]
                 self.bandwidth = 2400.0
             else:
-                self.frequencies = [1200.0, 1800.0, 2400.0, 3000.0]
+                self.frequencies = [4200.0, 4800.0, 5400.0, 6000.0]
                 self.bandwidth = 2400.0
         else:
             if ultrasonic:
                 self.frequencies = [17500.0, 18500.0]
                 self.bandwidth = 2000.0
             else:
-                self.frequencies = [1500.0, 2500.0]
+                self.frequencies = [4500.0, 5700.0]
                 self.bandwidth = 2000.0
 
         self.f0 = self.frequencies[0]
         self.f1 = self.frequencies[-1]
         self.samples_per_symbol = int(self.sample_rate / self.baud_rate)
-        self.samples_per_bit = self.samples_per_symbol  # Alias for chart preview helpers
+        self.samples_per_bit = self.samples_per_symbol
 
-        # Precompute quadrature reference bases for all M carrier frequencies
         t = np.arange(self.samples_per_symbol, dtype=np.float32) / self.sample_rate
         self._cos_bank = [np.cos(2.0 * np.pi * f * t) for f in self.frequencies]
         self._sin_bank = [np.sin(2.0 * np.pi * f * t) for f in self.frequencies]
 
+    def _apply_bandpass_filter(self, waveform: np.ndarray) -> np.ndarray:
+        """
+        Sharp FFT Band-Pass Filter:
+        Completely zeroes out human speech (< 3.8 kHz), low-frequency room rumble,
+        and out-of-band interference before demodulation.
+        """
+        n = len(waveform)
+        if n < self.samples_per_symbol:
+            return waveform
+
+        low_cut = min(self.frequencies) - 350.0
+        high_cut = max(self.frequencies) + 350.0
+
+        spectrum = np.fft.rfft(waveform)
+        freqs = np.fft.rfftfreq(n, d=1.0 / self.sample_rate)
+        mask = (freqs >= low_cut) & (freqs <= high_cut)
+        filtered = np.fft.irfft(spectrum * mask, n=n)
+        return filtered.astype(np.float32)
+
     def modulate(self, bits: str) -> np.ndarray:
         """
-        Modulate a binary bit string into a continuous-phase M-FSK (2-FSK or 4-FSK) waveform.
-        In 4-FSK mode, every 2 bits are grouped into a single acoustic symbol tone.
+        Modulate a binary bit string into a continuous-phase M-FSK waveform
+        using a raised-cosine envelope for clean spectral containment.
         """
         if not bits:
             return np.array([], dtype=np.float32)
@@ -75,7 +94,7 @@ class AcousticModemPHY:
         phase = 0.0
         t_step = 1.0 / self.sample_rate
 
-        edge_len = max(1, int(self.samples_per_symbol * 0.08))
+        edge_len = max(1, int(self.samples_per_symbol * 0.12))
         window = np.ones(self.samples_per_symbol, dtype=np.float32)
         ramp = 0.5 * (1.0 - np.cos(np.linspace(0, np.pi, edge_len)))
         window[:edge_len] = ramp
@@ -104,25 +123,41 @@ class AcousticModemPHY:
         return buffer.getvalue()
 
     def _isolate_carrier_burst(self, waveform: np.ndarray) -> np.ndarray:
-        """Locate the active M-FSK carrier region with safe margins on both ends."""
+        """
+        Isolate the active M-FSK signal burst only if narrowband carrier tones
+        dominate over background broadband noise.
+        """
         n_sym = len(waveform) // self.samples_per_symbol
         if n_sym < 6:
-            return waveform
+            return np.array([], dtype=np.float32)
 
         trimmed = waveform[:n_sym * self.samples_per_symbol]
         matrix = trimmed.reshape(n_sym, self.samples_per_symbol)
         norm = float(self.samples_per_symbol ** 2)
 
-        carrier_power = np.zeros(n_sym, dtype=np.float32)
-        for c_vec, s_vec in zip(self._cos_bank, self._sin_bank):
-            carrier_power += ((matrix @ c_vec) ** 2 + (matrix @ s_vec) ** 2) / norm
+        powers = np.zeros((self.levels_m, n_sym), dtype=np.float32)
+        for m_idx in range(self.levels_m):
+            c_vec = self._cos_bank[m_idx]
+            s_vec = self._sin_bank[m_idx]
+            powers[m_idx] = ((matrix @ c_vec) ** 2 + (matrix @ s_vec) ** 2) / norm
 
-        peak_power = float(np.max(carrier_power))
-        if peak_power < 1e-7:
+        max_tone_power = np.max(powers, axis=0)
+        total_power = np.sum(powers, axis=0)
+        other_power = (total_power - max_tone_power) / max(1, self.levels_m - 1)
+
+        # Tone Dominance Ratio: True FSK tones concentrate energy in a single carrier,
+        # whereas claps/speech spread energy across multiple frequencies.
+        dominance_ratio = max_tone_power / np.maximum(other_power, 1e-10)
+
+        peak_power = float(np.max(max_tone_power))
+        if peak_power < 1e-6:
             return np.array([], dtype=np.float32)
 
-        active_idx = np.where(carrier_power > peak_power * 0.05)[0]
-        if len(active_idx) < 6:
+        # Require both sufficient amplitude AND single-tone spectral dominance (> 2.2x)
+        valid_tone_mask = (max_tone_power > peak_power * 0.08) & (dominance_ratio > 2.2)
+        active_idx = np.where(valid_tone_mask)[0]
+
+        if len(active_idx) < 8:
             return np.array([], dtype=np.float32)
 
         start_sym = max(0, int(active_idx[0]) - 4)
@@ -131,7 +166,7 @@ class AcousticModemPHY:
 
     def demodulate(self, received_waveform: np.ndarray) -> dict:
         """
-        Fast vectorized non-coherent M-FSK demodulator (supports M=2 and M=4).
+        Fast vectorized non-coherent M-FSK demodulator with Tone-Dominance gating.
         """
         n_sym = len(received_waveform) // self.samples_per_symbol
         if n_sym == 0:
@@ -146,7 +181,6 @@ class AcousticModemPHY:
         matrix = trimmed.reshape(n_sym, self.samples_per_symbol)
         norm = float(self.samples_per_symbol ** 2)
 
-        # Compute energy matrix of shape (levels_m, n_sym)
         powers = np.zeros((self.levels_m, n_sym), dtype=np.float32)
         for m_idx in range(self.levels_m):
             c_vec = self._cos_bank[m_idx]
@@ -155,9 +189,9 @@ class AcousticModemPHY:
 
         total_p = np.sum(powers, axis=0)
         peak_p = float(np.max(total_p)) if len(total_p) > 0 else 0.0
-        squelch_threshold = peak_p * 0.03
+        squelch_threshold = peak_p * 0.05
 
-        best_Tone_indices = np.argmax(powers, axis=0)
+        best_tone_indices = np.argmax(powers, axis=0)
         detected_chunks = []
         signal_powers = []
         noise_powers = []
@@ -167,9 +201,14 @@ class AcousticModemPHY:
                 detected_chunks.append("00" if self.levels_m == 4 else "0")
                 continue
 
-            winner = int(best_Tone_indices[i])
+            winner = int(best_tone_indices[i])
             win_power = float(powers[winner, i])
             other_power = float(total_p[i] - win_power) / max(1, self.levels_m - 1)
+
+            # Reject broadband impulse noise (e.g. clapping/coughing) that excites all tones equally
+            if win_power < other_power * 1.8:
+                detected_chunks.append("00" if self.levels_m == 4 else "0")
+                continue
 
             signal_powers.append(win_power)
             noise_powers.append(max(other_power, 1e-12))
@@ -179,9 +218,9 @@ class AcousticModemPHY:
             else:
                 detected_chunks.append('1' if winner == 1 else '0')
 
-        avg_sig = float(np.mean(signal_powers)) if signal_powers else 1.0
+        avg_sig = float(np.mean(signal_powers)) if signal_powers else 0.0
         avg_noise = float(np.mean(noise_powers)) if noise_powers else 1e-6
-        snr_linear = avg_sig / max(avg_noise, 1e-12)
+        snr_linear = avg_sig / max(avg_noise, 1e-12) if avg_sig > 0 else 0.1
 
         return {
             "bits": ''.join(detected_chunks),
@@ -192,11 +231,12 @@ class AcousticModemPHY:
 
     def demodulate_stream(self, received_waveform: np.ndarray, use_hamming: bool = True) -> dict:
         """
-        Scan all 16 sub-symbol timing phases across the active waveform and
-        aggregate all decoded word frames.
+        Band-pass filter the microphone recording, isolate genuine FSK bursts,
+        and strictly extract only CRC-8 verified frames with high SNR.
         """
         if len(received_waveform) > 0:
             received_waveform = received_waveform - np.mean(received_waveform)
+            received_waveform = self._apply_bandpass_filter(received_waveform)
 
         active_wave = self._isolate_carrier_burst(received_waveform)
         if len(active_wave) < self.samples_per_symbol * 10:
@@ -208,7 +248,6 @@ class AcousticModemPHY:
             }
 
         collected_by_seq = {}
-        fallback_frames = []
         best_metrics = None
 
         num_phases = 16
@@ -224,30 +263,31 @@ class AcousticModemPHY:
             if best_metrics is None:
                 best_metrics = demod_candidate["metrics"]
 
-            # In 4-FSK, also check a 1-bit shifted alignment in case a frame starts on an odd bit
+            # Noise Gate: Require at least 4.5 dB in-band SNR to consider frames valid
+            if demod_candidate["metrics"]["snr_db"] < 4.5:
+                continue
+
             bit_candidates = [demod_candidate["bits"]]
             if self.levels_m == 4 and len(demod_candidate["bits"]) > 2:
                 bit_candidates.append(demod_candidate["bits"][1:])
 
             for cand_bits in bit_candidates:
-                frames = ChannelCoder.parse_all_frames(cand_bits, use_hamming=use_hamming)
+                # Strict CRC-8 enforcement: never accept unverified fallback frames from mic noise!
+                frames = ChannelCoder.parse_all_frames(
+                    cand_bits,
+                    use_hamming=use_hamming,
+                    strict_crc=True
+                )
                 for f in frames:
-                    if f.get("crc_passed"):
-                        hdr = ChannelCoder.unpack_packet_header(f["payload_bits"])
-                        if hdr.get("valid"):
-                            key = (hdr["msg_id"], hdr["seq_num"])
-                            if key not in collected_by_seq:
-                                collected_by_seq[key] = f
-                                best_metrics = demod_candidate["metrics"]
-                    else:
-                        fallback_frames.append(f)
-
-        final_frames = list(collected_by_seq.values())
-        if not final_frames and fallback_frames:
-            final_frames = fallback_frames[:1]
+                    hdr = ChannelCoder.unpack_packet_header(f["payload_bits"])
+                    if hdr.get("valid"):
+                        key = (hdr["msg_id"], hdr["seq_num"])
+                        if key not in collected_by_seq:
+                            collected_by_seq[key] = f
+                            best_metrics = demod_candidate["metrics"]
 
         return {
-            "valid_frames": final_frames,
+            "valid_frames": list(collected_by_seq.values()),
             "metrics": best_metrics,
             "last_burst_wave": active_wave
         }
@@ -258,13 +298,7 @@ class AcousticModemPHY:
         snr_linear: float,
         levels_m: int = 4
     ) -> dict:
-        """
-        Compute theoretical digital communication parameters (Slides 39-56):
-        - SNR (dB)           : 10 * log10(SNR)
-        - Nyquist Bit Rate   : Rb = 2 * B * log2(M)
-        - Shannon Capacity   : C = B * log2(1 + SNR)
-        - Effective Bit Rate : Rs * log2(M)
-        """
+        """Compute SNR (dB), Nyquist bit rate, and Shannon capacity."""
         snr_linear = max(snr_linear, 1e-9)
         snr_db = 10.0 * math.log10(snr_linear)
         nyquist_rate = 2.0 * bandwidth_hz * math.log2(levels_m)

@@ -4,7 +4,7 @@ class SourceCoder:
     """
     Source Encoder and Decoder module.
     Handles UTF-8 text conversion, binary image serialization,
-    and lossless Run-Length Encoding (RLE) compression.
+    clean text validation, and lossless Run-Length Encoding (RLE) compression.
     """
 
     @staticmethod
@@ -20,6 +20,19 @@ class SourceCoder:
         bits = bits[:valid_len]
         byte_array = bytearray(int(bits[i:i+8], 2) for i in range(0, len(bits), 8))
         return byte_array.decode('utf-8', errors='replace')
+
+    @staticmethod
+    def is_clean_text(text: str) -> bool:
+        """
+        Verify that decoded text contains only valid printable UTF-8 characters
+        and no replacement chars ('\\ufffd') or binary control codes caused by noise.
+        """
+        if not text or '\ufffd' in text:
+            return False
+        for ch in text:
+            if not (ch.isprintable() or ch in ('\n', '\t')):
+                return False
+        return True
 
     @staticmethod
     def binary_matrix_to_bits(matrix: list[list[int]]) -> str:
@@ -38,12 +51,7 @@ class SourceCoder:
 
     @staticmethod
     def rle_encode(bits: str) -> dict:
-        """
-        Compress a bit string using Run-Length Encoding (RLE).
-        Each run is encoded as an 8-bit chunk:
-        - 1st bit: bit value ('0' or '1')
-        - Next 7 bits: run length (1 to 127)
-        """
+        """Compress a bit string using Run-Length Encoding (RLE)."""
         if not bits:
             return {
                 "encoded_bits": "",

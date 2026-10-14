@@ -268,6 +268,8 @@ def decode_wav_api(request):
                 c_bits = header_info['content_bits']
                 raw_word_bits = SourceCoder.rle_decode(c_bits) if use_rle else c_bits
                 word_text = SourceCoder.bits_to_text(raw_word_bits)
+                if not SourceCoder.is_clean_text(word_text):
+                    continue
                 packets.append({
                     'msg_id': header_info['msg_id'],
                     'seq_num': header_info['seq_num'],
