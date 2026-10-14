@@ -6,7 +6,7 @@ class ChannelCoder:
     """
     Channel Coding and Data Link Layer Framing module.
     Includes CRC-8 error detection, Hamming(7,4) Forward Error Correction (FEC),
-    HDLC framing with bit stuffing, packet sequence headers, and error injection.
+    HDLC framing with shared flags, packet sequence headers, and error injection.
     """
     PREAMBLE = "10101010"      # 1-byte alternating preamble for receiver synchronization
     HDLC_FLAG = "01111110"     # Standard HDLC frame delimiter flag (0x7E)
@@ -181,8 +181,8 @@ class ChannelCoder:
         }
 
     @classmethod
-    def build_frame(cls, payload_bits: str, use_hamming: bool = True) -> dict:
-        """Construct a complete Data Link Layer frame with CRC-8, Hamming(7,4), and HDLC flags."""
+    def encode_frame_body(cls, payload_bits: str, use_hamming: bool = True) -> dict:
+        """Compute CRC-8, apply optional Hamming(7,4) FEC, and perform HDLC bit stuffing."""
         crc = cls.compute_crc(payload_bits)
         data_with_crc = payload_bits + crc
 
@@ -192,23 +192,66 @@ class ChannelCoder:
             protected_bits = data_with_crc
 
         stuffed_body = cls.bit_stuff(protected_bits)
+        return {
+            "stuffed_body": stuffed_body,
+            "crc_bits": crc,
+            "protected_len": len(protected_bits),
+            "stuffed_len": len(stuffed_body)
+        }
+
+    @classmethod
+    def build_frame(cls, payload_bits: str, use_hamming: bool = True) -> dict:
+        """Construct a standalone Data Link Layer frame with Preamble and HDLC flags."""
+        body_info = cls.encode_frame_body(payload_bits, use_hamming=use_hamming)
+        stuffed_body = body_info["stuffed_body"]
         full_frame = f"{cls.PREAMBLE}{cls.HDLC_FLAG}{stuffed_body}{cls.HDLC_FLAG}"
 
         return {
             "frame_bits": full_frame,
             "payload_len": len(payload_bits),
-            "crc_bits": crc,
-            "protected_len": len(protected_bits),
-            "stuffed_len": len(stuffed_body),
+            "crc_bits": body_info["crc_bits"],
+            "protected_len": body_info["protected_len"],
+            "stuffed_len": body_info["stuffed_len"],
             "total_frame_len": len(full_frame),
             "overhead_bits": len(full_frame) - len(payload_bits)
         }
 
     @classmethod
+    def build_shared_flag_stream(cls, payloads: list[str], use_hamming: bool = True) -> dict:
+        """
+        Build a high-efficiency back-to-back HDLC frame stream using Flag Sharing:
+        PREAMBLE + FLAG + Body_1 + FLAG + Body_2 + FLAG + ... + Body_N + FLAG
+        Eliminates redundant preambles and duplicate flags between consecutive words.
+        """
+        bodies = []
+        cumulative_bits = []
+        current_len = len(cls.PREAMBLE) + len(cls.HDLC_FLAG)
+        first_crc = "00000000"
+
+        for idx, p_bits in enumerate(payloads):
+            b_info = cls.encode_frame_body(p_bits, use_hamming=use_hamming)
+            if idx == 0:
+                first_crc = b_info["crc_bits"]
+            bodies.append(b_info["stuffed_body"])
+            current_len += len(b_info["stuffed_body"]) + len(cls.HDLC_FLAG)
+            cumulative_bits.append(current_len)
+
+        stream_bits = cls.PREAMBLE + cls.HDLC_FLAG + cls.HDLC_FLAG.join(bodies) + cls.HDLC_FLAG
+        first_single_frame = f"{cls.PREAMBLE}{cls.HDLC_FLAG}{bodies[0]}{cls.HDLC_FLAG}" if bodies else ""
+
+        return {
+            "stream_bits": stream_bits,
+            "first_frame_bits": first_single_frame,
+            "first_crc": first_crc,
+            "cumulative_bits": cumulative_bits,
+            "total_stream_len": len(stream_bits)
+        }
+
+    @classmethod
     def parse_all_frames(cls, received_frame_bits: str, use_hamming: bool = True) -> list[dict]:
         """
-        Scan a bit stream and extract all HDLC frames between 01111110 flags.
-        Prioritizes CRC-verified frames and retains best-effort FEC frames as fallback.
+        Scan a bit stream and extract all HDLC frames between 01111110 flags
+        (supports both standalone frames and shared-flag back-to-back streams).
         """
         flag = cls.HDLC_FLAG
         flag_len = len(flag)

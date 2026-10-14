@@ -2,6 +2,7 @@
 import base64
 import io
 import json
+import math
 import random
 import wave
 import numpy as np
@@ -15,15 +16,15 @@ from .engine.channel_coding import ChannelCoder
 from .engine.modem_phy import AcousticModemPHY
 
 
-def _extract_fsk_transition_preview(waveform: np.ndarray, samples_per_bit: int) -> list[float]:
+def _extract_fsk_transition_preview(waveform: np.ndarray, samples_per_symbol: int) -> list[float]:
     """
-    Extract a normalized window around the first bit transition (Bit '1' -> Bit '0')
-    so the FSK frequency shift is clearly rendered on the Signal Lab chart.
+    Extract a normalized window around the first symbol transition so the
+    M-FSK frequency shift is clearly rendered on the Signal Lab chart.
     """
     if len(waveform) == 0:
         return [0.0] * 200
 
-    boundary = min(samples_per_bit, len(waveform) // 2)
+    boundary = min(samples_per_symbol, len(waveform) // 2)
     half_win = min(220, boundary)
     start = max(0, boundary - half_win)
     end = min(len(waveform), boundary + half_win)
@@ -48,8 +49,8 @@ def dashboard_view(request):
 @csrf_exempt
 def transmit_and_analyze_api(request):
     """
-    Packetize message into per-word HDLC frames with Sequence Numbers,
-    modulate into FSK audio, and return word timing schedule for live display.
+    High-Speed Transmission Pipeline:
+    Supports 4-FSK (M=4, 2 bits/symbol) and Shared-Flag HDLC framing.
     """
     if request.method != 'POST':
         return JsonResponse({'error': 'POST request required.'}, status=405)
@@ -57,7 +58,8 @@ def transmit_and_analyze_api(request):
     try:
         data = json.loads(request.body.decode('utf-8'))
         text = data.get('text', '').strip() or 'Hello UoM!'
-        baud_rate = int(data.get('baud_rate', 45))
+        baud_rate = int(data.get('baud_rate', 65))
+        levels_m = int(data.get('levels_m', 4))
         ultrasonic = bool(data.get('ultrasonic', False))
         delivery_mode = data.get('delivery_mode', 'stream')  # 'stream' or 'full'
         use_rle = bool(data.get('use_rle', False))
@@ -68,24 +70,24 @@ def transmit_and_analyze_api(request):
         stream_mode_flag = (delivery_mode == 'stream')
         msg_id = random.randint(1, 7)
 
-        words = [w for w in text.split(' ') if w]
-        if not words:
-            words = [text]
+        # In 'full' mode, group into larger chunks (up to 4 words per frame) to slash overhead!
+        raw_words = [w for w in text.split(' ') if w] or [text]
+        if stream_mode_flag:
+            chunks = raw_words
+        else:
+            chunks = [' '.join(raw_words[i:i+4]) for i in range(0, len(raw_words), 4)]
 
-        frame_bits_list = []
-        packet_schedule = []
+        payloads = []
         total_raw_bits = 0
         total_rle_bits = 0
-        first_frame_info = None
-        cumulative_bits = 0
 
-        for idx, word in enumerate(words):
-            is_last = (idx == len(words) - 1)
-            word_bits = SourceCoder.text_to_bits(word)
-            rle_stats = SourceCoder.rle_encode(word_bits)
-            encoded_word_bits = rle_stats['encoded_bits'] if use_rle else word_bits
+        for idx, chunk_text in enumerate(chunks):
+            is_last = (idx == len(chunks) - 1)
+            c_bits = SourceCoder.text_to_bits(chunk_text)
+            rle_stats = SourceCoder.rle_encode(c_bits)
+            encoded_bits = rle_stats['encoded_bits'] if use_rle else c_bits
 
-            total_raw_bits += len(word_bits)
+            total_raw_bits += len(c_bits)
             total_rle_bits += rle_stats['compressed_len']
 
             header_bits = ChannelCoder.pack_packet_header(
@@ -94,32 +96,37 @@ def transmit_and_analyze_api(request):
                 is_last=is_last,
                 stream_mode=stream_mode_flag
             )
-            packet_payload = header_bits + encoded_word_bits
-            f_info = ChannelCoder.build_frame(packet_payload, use_hamming=use_hamming)
-            f_bits = f_info['frame_bits']
-            frame_bits_list.append(f_bits)
+            payloads.append(header_bits + encoded_bits)
 
-            cumulative_bits += len(f_bits) + (4 if not is_last else 0)
-            emit_time_sec = round(cumulative_bits / baud_rate, 3)
+        # Build back-to-back Shared-Flag HDLC stream (eliminates redundant flags & preambles)
+        stream_info = ChannelCoder.build_shared_flag_stream(payloads, use_hamming=use_hamming)
+        stream_bits = stream_info['stream_bits']
 
-            packet_schedule.append({
-                'msg_id': msg_id,
-                'seq_num': idx,
-                'is_last': is_last,
-                'stream_mode': stream_mode_flag,
-                'word': word,
-                'emit_time_sec': emit_time_sec
-            })
-
-            if first_frame_info is None:
-                first_frame_info = f_info
-
-        modem = AcousticModemPHY(sample_rate=44100, baud_rate=baud_rate, ultrasonic=ultrasonic)
-        clean_waveform = modem.modulate_packet_stream(frame_bits_list, guard_bits=4)
+        modem = AcousticModemPHY(
+            sample_rate=44100,
+            baud_rate=baud_rate,
+            ultrasonic=ultrasonic,
+            levels_m=levels_m
+        )
+        clean_waveform = modem.modulate(stream_bits)
         wav_bytes = modem.waveform_to_wav_bytes(clean_waveform)
         wav_base64 = base64.b64encode(wav_bytes).decode('ascii')
 
-        first_tx_bits = frame_bits_list[0]
+        effective_bps = modem.bit_rate_bps
+        packet_schedule = []
+        for idx, chunk_text in enumerate(chunks):
+            emit_sec = round(stream_info['cumulative_bits'][idx] / effective_bps, 3)
+            packet_schedule.append({
+                'msg_id': msg_id,
+                'seq_num': idx,
+                'is_last': (idx == len(chunks) - 1),
+                'stream_mode': stream_mode_flag,
+                'word': chunk_text,
+                'emit_time_sec': emit_sec
+            })
+
+        # Simulate Noisy Channel on the first frame for Signal Lab preview
+        first_tx_bits = stream_info['first_frame_bits']
         first_wave = modem.modulate(first_tx_bits)
         if noise_std > 0:
             rx_first_wave = first_wave + np.random.normal(0.0, noise_std, size=first_wave.shape).astype(np.float32)
@@ -127,7 +134,7 @@ def transmit_and_analyze_api(request):
             rx_first_wave = first_wave.copy()
 
         demod_res = modem.demodulate(rx_first_wave)
-        rx_bits = demod_res['bits']
+        rx_bits = demod_res['bits'][:len(first_tx_bits)]
 
         flipped_indices = []
         header_offset = len(ChannelCoder.PREAMBLE) + len(ChannelCoder.HDLC_FLAG)
@@ -145,12 +152,12 @@ def transmit_and_analyze_api(request):
         corrected_count = parsed.get('corrected_errors_count', 0) if parsed.get('valid_frame') else 0
 
         metrics = demod_res['metrics']
-        total_stream_bits = sum(len(b) for b in frame_bits_list)
+        total_stream_bits = stream_info['total_stream_len']
 
         log_entry = TransmissionLog.objects.create(
             input_text=text,
             carrier_mode='ultrasonic' if ultrasonic else 'audible',
-            baud_rate=baud_rate,
+            baud_rate=effective_bps,
             use_rle=use_rle,
             use_hamming=use_hamming,
             raw_bits_len=total_raw_bits,
@@ -165,13 +172,13 @@ def transmit_and_analyze_api(request):
             recovered_text=text
         )
 
-        waveform_preview = _extract_fsk_transition_preview(rx_first_wave, modem.samples_per_bit)
+        waveform_preview = _extract_fsk_transition_preview(rx_first_wave, modem.samples_per_symbol)
 
         return JsonResponse({
             'status': 'ok',
             'log_id': log_entry.id,
             'msg_id': msg_id,
-            'packet_count': len(words),
+            'packet_count': len(chunks),
             'packet_schedule': packet_schedule,
             'delivery_mode': delivery_mode,
             'audio_wav_base64': wav_base64,
@@ -179,7 +186,7 @@ def transmit_and_analyze_api(request):
             'framing': {
                 'raw_bits_len': total_raw_bits,
                 'rle_compressed_len': total_rle_bits,
-                'crc_bits': first_frame_info['crc_bits'],
+                'crc_bits': stream_info['first_crc'],
                 'total_frame_len': total_stream_bits,
                 'tx_frame_bits': first_tx_bits[:160],
                 'rx_frame_bits': rx_bits[:160],
@@ -206,15 +213,16 @@ def transmit_and_analyze_api(request):
 @csrf_exempt
 def decode_wav_api(request):
     """
-    Demodulate a live microphone snapshot or uploaded WAV file,
-    extract all packet frames, unpack sequence numbers, and return decoded words.
+    Demodulate a live microphone snapshot or uploaded WAV file using
+    M-FSK (2-FSK or 4-FSK) and shared-flag HDLC frame extraction.
     """
     if request.method != 'POST' or 'audio_file' not in request.FILES:
         return JsonResponse({'error': 'WAV audio_file required.'}, status=400)
 
     try:
         audio_file = request.FILES['audio_file']
-        baud_rate = int(request.POST.get('baud_rate', 45))
+        baud_rate = int(request.POST.get('baud_rate', 65))
+        levels_m = int(request.POST.get('levels_m', 4))
         ultrasonic = request.POST.get('ultrasonic', 'false').lower() == 'true'
         use_hamming = request.POST.get('use_hamming', 'true').lower() == 'true'
         use_rle = request.POST.get('use_rle', 'false').lower() == 'true'
@@ -226,7 +234,12 @@ def decode_wav_api(request):
             raw_pcm = wf.readframes(n_frames)
             waveform = np.frombuffer(raw_pcm, dtype=np.int16).astype(np.float32) / 32768.0
 
-        modem = AcousticModemPHY(sample_rate=sample_rate, baud_rate=baud_rate, ultrasonic=ultrasonic)
+        modem = AcousticModemPHY(
+            sample_rate=sample_rate,
+            baud_rate=baud_rate,
+            ultrasonic=ultrasonic,
+            levels_m=levels_m
+        )
         stream_res = modem.demodulate_stream(waveform, use_hamming=use_hamming)
         valid_frames = stream_res['valid_frames']
         metrics = stream_res['metrics']
@@ -282,9 +295,9 @@ def decode_wav_api(request):
         assembled_text = ' '.join(assembled_words)
 
         last_burst = stream_res['last_burst_wave']
-        if len(last_burst) < modem.samples_per_bit * 2:
+        if len(last_burst) < modem.samples_per_symbol * 2:
             last_burst = modem.modulate(last_matched_bits[:16] or '10101010')
-        waveform_preview = _extract_fsk_transition_preview(last_burst, modem.samples_per_bit)
+        waveform_preview = _extract_fsk_transition_preview(last_burst, modem.samples_per_symbol)
 
         return JsonResponse({
             'status': 'ok',

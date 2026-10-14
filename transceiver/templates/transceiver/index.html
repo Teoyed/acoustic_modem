@@ -41,7 +41,7 @@
         <!-- Minimal App Header -->
         <div class="text-center space-y-1">
             <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-xs font-medium mb-1">
-                <span>44.1 kHz Packetized Acoustic Link</span>
+                <span id="headerBadgeText">44.1 kHz | 4-FSK Turbo Acoustic Link</span>
             </div>
             <h1 class="text-2xl font-bold tracking-tight text-white">SonicDrop</h1>
             <p class="text-xs text-slate-400">Send &amp; receive messages over sound waves without Wi-Fi or Bluetooth</p>
@@ -74,7 +74,19 @@
                           class="w-full bg-slate-950 border border-slate-800 rounded-xl p-4 text-white text-base focus:outline-none focus:border-indigo-500 resize-none"></textarea>
             </div>
 
-            <!-- Delivery Mode Option (Live Word-by-Word vs Full Message at End) -->
+            <!-- Multi-Level Modulation Speed Option (4-FSK M=4 vs 2-FSK M=2) -->
+            <div class="flex items-center justify-between bg-slate-950 border border-slate-800/80 rounded-xl px-4 py-3">
+                <div>
+                    <div class="text-sm font-medium text-slate-200">Modulation Speed (Nyquist M)</div>
+                    <div class="text-xs text-slate-400">4-FSK sends 2 bits per tone + Shared HDLC Flags (3x faster)</div>
+                </div>
+                <select id="levelsM" onchange="broadcastSettings()" class="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-emerald-400 font-semibold focus:outline-none">
+                    <option value="4" selected>4-FSK Turbo (M=4, 2 bits/sym)</option>
+                    <option value="2">2-FSK Standard (M=2, 1 bit/sym)</option>
+                </select>
+            </div>
+
+            <!-- Delivery Mode Option -->
             <div class="flex items-center justify-between bg-slate-950 border border-slate-800/80 rounded-xl px-4 py-3">
                 <div>
                     <div class="text-sm font-medium text-slate-200">Receiver Display Mode</div>
@@ -93,7 +105,7 @@
                     <div class="text-xs text-slate-400">Choose audible tones or silent ultrasonic waves</div>
                 </div>
                 <select id="carrierMode" onchange="broadcastSettings()" class="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none">
-                    <option value="audible">Audible (1.5 / 2.5 kHz)</option>
+                    <option value="audible">Audible Band</option>
                     <option value="ultrasonic">Ultrasonic (Silent)</option>
                 </select>
             </div>
@@ -164,7 +176,7 @@
                 <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
                     <div class="text-xs text-slate-400">Signal Quality (SNR)</div>
                     <div id="metricSnr" class="text-xl font-bold text-white mt-1">-- dB</div>
-                    <div class="text-[11px] text-slate-500 mt-0.5">Signal-to-Noise Ratio</div>
+                    <div id="metricBitRate" class="text-[11px] text-emerald-400 font-mono mt-0.5">Effective Rate: -- bps</div>
                 </div>
                 <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
                     <div class="text-xs text-slate-400">Shannon Max Speed</div>
@@ -185,7 +197,7 @@
 
             <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-3">
                 <div class="flex items-center justify-between">
-                    <h3 class="text-sm font-semibold text-white">HDLC Packet Frame Bits</h3>
+                    <h3 class="text-sm font-semibold text-white">HDLC Shared-Flag Frame Bits</h3>
                     <div class="flex gap-3 text-[11px] text-slate-400">
                         <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-sky-600"></span> Preamble</span>
                         <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-purple-600"></span> HDLC Flag</span>
@@ -200,8 +212,8 @@
 
             <div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
                 <div class="flex items-center justify-between mb-3">
-                    <h3 class="text-sm font-semibold text-white">Modulated FSK Sound Wave (Bit 1 &rarr; Bit 0 Transition)</h3>
-                    <span class="text-[11px] font-mono text-indigo-400">f1 (High Freq) &rarr; f0 (Low Freq)</span>
+                    <h3 class="text-sm font-semibold text-white">Modulated M-FSK Sound Wave (Symbol Transition)</h3>
+                    <span class="text-[11px] font-mono text-indigo-400">Rb = Rs &times; log2(M)</span>
                 </div>
                 <div class="relative h-44 w-full">
                     <canvas id="waveformChart"></canvas>
@@ -214,9 +226,9 @@
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
                     <div>
                         <label class="text-slate-400 block mb-1">
-                            Speed (Baud Rate): <span id="baudValue" class="text-white font-mono">45</span> bps
+                            Symbol Rate (Rs): <span id="baudValue" class="text-white font-mono">65</span> Baud
                         </label>
-                        <input id="baudRate" type="range" min="20" max="90" step="5" value="45"
+                        <input id="baudRate" type="range" min="25" max="110" step="5" value="65"
                                oninput="document.getElementById('baudValue').innerText = this.value; broadcastSettings();"
                                class="w-full accent-indigo-500">
                     </div>
@@ -265,7 +277,6 @@
         let isPollingDecode = false;
         let scheduledTimers = [];
 
-        // Live Packet Assembly State at Receiver
         let activeMsgId = null;
         let receivedWordMap = {};
         let currentMsgComplete = false;
@@ -278,18 +289,27 @@
             if (msg.type === 'SIGNAL_LAB_UPDATE') {
                 updateSignalLabUI(msg.payload);
             } else if (msg.type === 'ACOUSTIC_STREAM_START') {
-                // If this window's Receiver (Listen tab) is actively listening, track the live acoustic packet emission!
                 if (isRecording) {
                     scheduleLiveAcousticPackets(msg.payload);
                 }
             } else if (msg.type === 'SETTINGS_SYNC') {
                 document.getElementById('baudRate').value = msg.baud_rate;
                 document.getElementById('baudValue').innerText = msg.baud_rate;
+                document.getElementById('levelsM').value = msg.levels_m;
                 document.getElementById('carrierMode').value = msg.carrier_mode;
                 document.getElementById('useHamming').checked = msg.use_hamming;
                 document.getElementById('useRle').checked = msg.use_rle;
+                updateHeaderBadge();
             }
         };
+
+        function updateHeaderBadge() {
+            const m = document.getElementById('levelsM').value;
+            const baud = parseInt(document.getElementById('baudRate').value);
+            const bps = baud * (m === '4' ? 2 : 1);
+            document.getElementById('headerBadgeText').innerText =
+                `44.1 kHz | ${m}-FSK (${bps} bps Effective Bit Rate)`;
+        }
 
         function clearScheduledTimers() {
             scheduledTimers.forEach(t => clearTimeout(t));
@@ -307,20 +327,21 @@
             totalExpectedWords = schedule.length;
 
             schedule.forEach((pkt) => {
-                const delayMs = Math.max(150, Math.round(pkt.emit_time_sec * 1000));
+                const delayMs = Math.max(80, Math.round(pkt.emit_time_sec * 1000));
                 const timerId = setTimeout(() => {
                     if (!isRecording) return;
                     applyIncomingPacketToReceiverUI(
                         pkt,
                         txData.fec_and_crc.corrected_count,
-                        txData.channel_metrics.snr_db
+                        txData.channel_metrics.snr_db,
+                        txData.channel_metrics.actual_bit_rate_bps
                     );
                 }, delayMs);
                 scheduledTimers.push(timerId);
             });
         }
 
-        function applyIncomingPacketToReceiverUI(pkt, repairedCount, snrDb) {
+        function applyIncomingPacketToReceiverUI(pkt, repairedCount, snrDb, bitRateBps) {
             const badge = document.getElementById('otaCrcBadge');
             if (activeMsgId !== pkt.msg_id) {
                 activeMsgId = pkt.msg_id;
@@ -340,40 +361,40 @@
                 : `${sortedSeqs.length}`;
 
             if (pkt.stream_mode) {
-                // MODE 1: Live Word-by-Word
                 document.getElementById('otaDecodedText').innerText =
                     currentMsgComplete ? fullSentenceSoFar : (fullSentenceSoFar + ' ...');
                 document.getElementById('otaStatusText').innerText = currentMsgComplete
-                    ? `Message complete (${countLabel} words decoded live over sound)!`
-                    : `Streaming live word-by-word (${countLabel} words decoded)...`;
-                badge.innerText = currentMsgComplete ? 'Stream Complete (CRC-8 OK)' : `Word ${countLabel} Live`;
+                    ? `Message complete (${countLabel} packets decoded live at ${bitRateBps || 130} bps)!`
+                    : `Streaming live word-by-word (${countLabel} decoded)...`;
+                badge.innerText = currentMsgComplete ? 'Stream Complete (CRC-8 OK)' : `Packet ${countLabel} Live`;
                 badge.className = 'text-[11px] px-2 py-0.5 rounded font-medium bg-emerald-500/20 text-emerald-400';
             } else {
-                // MODE 2: Full Message at End
                 if (currentMsgComplete) {
                     document.getElementById('otaDecodedText').innerText = fullSentenceSoFar;
                     document.getElementById('otaStatusText').innerText =
-                        `Full message received (${countLabel} packets reassembled)!`;
+                        `Full message received (${countLabel} blocks reassembled)!`;
                     badge.innerText = 'Full Message Verified';
                     badge.className = 'text-[11px] px-2 py-0.5 rounded font-medium bg-emerald-500/20 text-emerald-400';
                 } else {
                     document.getElementById('otaDecodedText').innerText =
-                        `[Buffering acoustic packets: ${countLabel} received...]`;
+                        `[Buffering high-speed packets: ${countLabel} received...]`;
                     document.getElementById('otaStatusText').innerText =
-                        'Sender selected "Full Message at End" — buffering until final HDLC frame...';
+                        'Sender selected "Full Message at End" — buffering until final HDLC flag...';
                     badge.innerText = `Buffering ${countLabel}`;
                     badge.className = 'text-[11px] px-2 py-0.5 rounded font-medium bg-amber-500/20 text-amber-400';
                 }
             }
 
             document.getElementById('otaFecNote').innerText =
-                `Mode: ${pkt.stream_mode ? 'Live Word-by-Word' : 'Full Message at End'} | Hamming(7,4) Repaired: ${repairedCount} bit(s) | SNR: ${snrDb} dB`;
+                `Speed: ${bitRateBps || 130} bps | Hamming(7,4) Repaired: ${repairedCount} bit(s) | SNR: ${snrDb} dB`;
         }
 
         function broadcastSettings() {
+            updateHeaderBadge();
             syncChannel.postMessage({
                 type: 'SETTINGS_SYNC',
                 baud_rate: document.getElementById('baudRate').value,
+                levels_m: document.getElementById('levelsM').value,
                 carrier_mode: document.getElementById('carrierMode').value,
                 use_hamming: document.getElementById('useHamming').checked,
                 use_rle: document.getElementById('useRle').checked
@@ -435,8 +456,11 @@
             const fr = data.framing;
 
             document.getElementById('metricSnr').innerText = m.snr_db + ' dB';
+            document.getElementById('metricBitRate').innerText =
+                `${m.levels_m || 4}-FSK Rate: ${m.actual_bit_rate_bps} bps (${m.symbol_rate_baud || 65} Bd)`;
             document.getElementById('metricShannon').innerText = m.shannon_capacity_bps + ' bps';
-            document.getElementById('metricNyquist').innerText = 'Nyquist Limit: ' + m.nyquist_max_bps + ' bps';
+            document.getElementById('metricNyquist').innerText =
+                `Nyquist (M=${m.levels_m || 4}): ${m.nyquist_max_bps} bps`;
             document.getElementById('metricFec').innerText = f.corrected_count + ' Bits Fixed';
             document.getElementById('metricBer').innerText = `Bit Error Rate (BER): ${f.ber}`;
             document.getElementById('metricCrc').innerText = f.crc_passed ? 'Valid (Passed)' : 'Corrupted';
@@ -467,10 +491,11 @@
 
             const btn = document.getElementById('transmitBtn');
             btn.disabled = true;
-            btn.innerText = 'Generating Packetized Audio...';
+            btn.innerText = 'Modulating High-Speed Audio...';
 
             const payload = {
                 text: message,
+                levels_m: parseInt(document.getElementById('levelsM').value),
                 delivery_mode: document.getElementById('deliveryMode').value,
                 ultrasonic: document.getElementById('carrierMode').value === 'ultrasonic',
                 baud_rate: parseInt(document.getElementById('baudRate').value),
@@ -494,7 +519,7 @@
 
                 document.getElementById('playerCard').classList.remove('hidden');
                 document.getElementById('playStatusLabel').innerText =
-                    `Transmitting ${data.packet_count} word packet(s) (${data.duration_sec}s)...`;
+                    `Transmitting ${data.packet_count} packet(s) at ${data.channel_metrics.actual_bit_rate_bps} bps (${data.duration_sec}s)...`;
                 const audioPlayer = document.getElementById('audioPlayer');
                 audioPlayer.src = 'data:audio/wav;base64,' + data.audio_wav_base64;
                 audioPlayer.play().catch(() => {});
@@ -574,7 +599,7 @@
                 currentMsgComplete = false;
                 isRecording = true;
 
-                const maxChunks = 250;
+                const maxChunks = 220;
                 scriptProcessor.onaudioprocess = (e) => {
                     if (!isRecording) return;
                     recordedBuffers.push(new Float32Array(e.inputBuffer.getChannelData(0)));
@@ -588,11 +613,11 @@
 
                 btn.classList.add('listening-pulse', 'bg-amber-600');
                 label.innerText = 'Stop';
-                statusText.innerText = 'Listening live for FSK sound waves...';
+                statusText.innerText = 'Listening live for M-FSK sound waves...';
                 badge.innerText = 'Listening Live...';
                 badge.className = 'text-[11px] px-2 py-0.5 rounded font-medium bg-indigo-500/20 text-indigo-400';
 
-                livePollTimer = setInterval(pollLiveDecode, 1000);
+                livePollTimer = setInterval(pollLiveDecode, 850);
 
             } catch (err) {
                 alert('Could not access microphone: ' + err);
@@ -648,12 +673,12 @@
         }
 
         async function pollLiveDecode() {
-            if (!isRecording || isPollingDecode || !audioCtx || recordedBuffers.length < 8) {
+            if (!isRecording || isPollingDecode || !audioCtx || recordedBuffers.length < 6) {
                 return;
             }
             isPollingDecode = true;
             try {
-                const recentSlice = recordedBuffers.slice(-85);
+                const recentSlice = recordedBuffers.slice(-75);
                 const wavBlob = encodeWAV(recentSlice, audioCtx.sampleRate);
                 await sendWavToBackend(wavBlob, true, false);
             } finally {
@@ -718,6 +743,7 @@
             const formData = new FormData();
             formData.append('audio_file', wavBlob, 'capture.wav');
             formData.append('baud_rate', document.getElementById('baudRate').value);
+            formData.append('levels_m', document.getElementById('levelsM').value);
             formData.append('ultrasonic', document.getElementById('carrierMode').value === 'ultrasonic');
             formData.append('use_hamming', document.getElementById('useHamming').checked);
             formData.append('use_rle', document.getElementById('useRle').checked);
@@ -732,7 +758,8 @@
                         applyIncomingPacketToReceiverUI(
                             pkt,
                             data.corrected_errors_count,
-                            data.metrics.snr_db
+                            data.metrics.snr_db,
+                            data.metrics.actual_bit_rate_bps
                         );
                     }
                     if (forceReveal) {
@@ -755,6 +782,7 @@
 
         window.onload = () => {
             initChart();
+            updateHeaderBadge();
         };
     </script>
 </body>
