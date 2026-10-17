@@ -1,146 +1,205 @@
 <!-- transceiver/templates/transceiver/index.html -->
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>SonicDrop | Acoustic Messenger</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=Syne:wght@700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        body {
-            background-color: #090d16;
-            color: #f8fafc;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        :root {
+            --bg: #edf0f8; --card: #fff; --ink: #0f1530; --muted: #6b7391; --line: #dde2ef;
+            --blue: #3a3aff; --blue-soft: #e8e8ff; --orange: #ff5a36; --green: #0e9f78; --amber: #b87900;
+            --display: "Syne", "DM Sans", ui-sans-serif, system-ui, sans-serif;
+            --body: "DM Sans", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
         }
-        .bit-pill {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            width: 22px;
-            height: 26px;
-            font-family: ui-monospace, monospace;
-            font-size: 12px;
-            margin: 2px;
-            border-radius: 6px;
-        }
-        @keyframes pulse-ring {
-            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(244, 63, 94, 0.7); }
-            70% { transform: scale(1); box-shadow: 0 0 0 22px rgba(244, 63, 94, 0); }
-            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(244, 63, 94, 0); }
-        }
-        .listening-pulse {
-            animation: pulse-ring 1.8s infinite;
+        * { box-sizing: border-box; }
+        body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--ink); font: 15px/1.5 var(--body); -webkit-font-smoothing: antialiased; }
+        .hidden { display: none !important; }
+        :focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+        .app { max-width: 480px; margin: 0 auto; padding: 20px 16px calc(120px + env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 16px; }
+
+        /* Top bar + stage */
+        .brand { display: flex; align-items: center; gap: 10px; font: 800 22px var(--display); letter-spacing: -0.02em; }
+        .brand svg { width: 26px; height: 26px; }
+        .stage { position: relative; overflow: hidden; padding: 24px 22px 20px; border-radius: 28px; background: var(--blue); color: #fff; display: flex; flex-direction: column; gap: 22px; }
+        .stage h1 { margin: 0; max-width: 14ch; font: 800 30px/1.05 var(--display); letter-spacing: -0.03em; }
+        .bars { display: flex; align-items: center; justify-content: space-between; gap: 3px; height: 64px; }
+        .bars i { flex: 1; height: calc(var(--h) * 1%); border-radius: 99px; background: rgba(255, 255, 255, .85); transform-origin: center; }
+        .stage.live .bars i { animation: bar 1s ease-in-out infinite alternate; animation-delay: var(--d); }
+        @keyframes bar { from { transform: scaleY(.35); } to { transform: scaleY(1); } }
+        .chip { align-self: flex-start; padding: 5px 12px; border-radius: 99px; background: rgba(255, 255, 255, .18); font-size: 12.5px; font-weight: 500; }
+
+        /* Dock navigation */
+        .dock { position: fixed; z-index: 10; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom)); transform: translateX(-50%); display: flex; gap: 4px; padding: 6px; background: var(--ink); border-radius: 99px; box-shadow: 0 10px 30px rgba(15, 21, 48, .28); }
+        .tab { position: relative; display: flex; align-items: center; gap: 8px; padding: 11px 18px; border: 0; border-radius: 99px; background: transparent; color: #aab2d1; font: 500 14px var(--body); cursor: pointer; transition: background .15s, color .15s; }
+        .tab svg { width: 18px; height: 18px; flex: none; }
+        .tab:hover { color: #fff; }
+        .tab.active { background: #fff; color: var(--ink); }
+        .tab span.label { display: none; }
+        .tab.active span.label { display: inline; }
+        .dot-badge { position: absolute; top: 8px; right: 10px; width: 8px; height: 8px; border-radius: 50%; background: var(--orange); }
+
+        /* Cards, fields */
+        .card { padding: 22px; background: var(--card); border-radius: 28px; display: flex; flex-direction: column; gap: 18px; }
+        .label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 13px; font-weight: 500; }
+        textarea { width: 100%; resize: none; padding: 14px 16px; background: var(--bg); border: 2px solid transparent; border-radius: 18px; color: var(--ink); font: 400 17px/1.5 var(--body); transition: border-color .15s, background .15s; }
+        textarea::placeholder { color: #98a0bb; }
+        textarea:focus { outline: none; background: #fff; border-color: var(--blue); }
+        select { width: 100%; appearance: none; -webkit-appearance: none; padding: 10px 32px 10px 14px; background: var(--bg) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b7391' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 12px center; border: 0; border-radius: 99px; color: var(--ink); font: 500 13.5px var(--body); cursor: pointer; }
+        input[type=range], input[type=checkbox] { accent-color: var(--blue); }
+        input[type=range] { width: 100%; }
+        input[type=checkbox] { width: 16px; height: 16px; }
+        .opts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+        @media (max-width: 460px) { .opts { grid-template-columns: 1fr; } }
+        .btn { width: 100%; height: 54px; border: 0; border-radius: 99px; background: var(--ink); color: #fff; font: 600 16px var(--body); cursor: pointer; transition: background .15s, transform .1s; }
+        .btn:hover { background: var(--blue); }
+        .btn:active { transform: scale(.99); }
+        .btn:disabled { opacity: .6; cursor: progress; }
+        .player { padding: 14px; background: var(--bg); border-radius: 20px; display: flex; flex-direction: column; gap: 10px; }
+        .player-top { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; }
+        .player-top span { color: var(--green); font-weight: 600; }
+        .link { background: none; border: 0; padding: 0; color: var(--blue); font: 600 13px var(--body); cursor: pointer; white-space: nowrap; }
+        audio { width: 100%; height: 36px; }
+
+        /* Listen */
+        .listen { display: flex; flex-direction: column; align-items: center; gap: 18px; text-align: center; }
+        .listen h2 { margin: 0; font: 800 24px var(--display); letter-spacing: -0.02em; }
+        #otaStatusText { margin: 4px 0 0; color: var(--muted); font-size: 14px; }
+        .sonar { display: grid; place-items: center; width: 280px; max-width: 100%; aspect-ratio: 1; border-radius: 50%; background: repeating-radial-gradient(circle, transparent 0 42px, var(--line) 42px 44px); -webkit-mask: radial-gradient(circle, #000 66%, transparent 71%); mask: radial-gradient(circle, #000 66%, transparent 71%); }
+        .sonar-hit { display: grid; place-items: center; }
+        .mic-btn { position: relative; width: 120px; height: 120px; border: 0; border-radius: 50%; background: var(--orange); color: #fff; font: 600 14px var(--body); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; cursor: pointer; box-shadow: 0 12px 28px rgba(255, 90, 54, .35); transition: transform .15s; }
+        .mic-btn:hover { transform: scale(1.04); }
+        .mic-btn svg { width: 30px; height: 30px; }
+        .mic-btn::before, .mic-btn::after { content: ""; position: absolute; inset: 0; border-radius: 50%; border: 2px solid var(--orange); opacity: 0; pointer-events: none; }
+        .mic-btn.is-listening::before { animation: ripple 2.4s ease-out infinite; }
+        .mic-btn.is-listening::after { animation: ripple 2.4s ease-out 1.2s infinite; }
+        @keyframes ripple { from { transform: scale(1); opacity: .7; } to { transform: scale(1.9); opacity: 0; } }
+        .bubble { align-self: stretch; text-align: left; padding: 16px 20px; background: var(--card); border-radius: 24px 24px 24px 6px; display: flex; flex-direction: column; gap: 8px; }
+        .bubble-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 13px; font-weight: 500; }
+        #otaDecodedText { font: 700 20px/1.35 var(--display); min-height: 1.75rem; overflow-wrap: anywhere; }
+        #otaFecNote { color: var(--muted); font-size: 12.5px; }
+        .badge { padding: 2px 10px; border-radius: 99px; background: var(--bg); color: var(--muted); font-size: 12px; font-weight: 600; }
+        .badge-ok { background: #d9f5ec; color: var(--green); }
+        .badge-warn { background: #fff0c9; color: var(--amber); }
+        .badge-live { background: var(--blue-soft); color: var(--blue); }
+        .badge-err { background: #ffe1da; color: #d6381a; }
+        .upload { color: var(--muted); font-size: 13px; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
+        .upload:hover { color: var(--blue); }
+
+        /* Signal lab */
+        .lab { display: flex; flex-direction: column; gap: 12px; }
+        .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        .metric { padding: 16px 18px; background: var(--card); border-radius: 24px; }
+        .metric-label { color: var(--muted); font-size: 12.5px; }
+        .metric-value { margin-top: 2px; font: 800 22px var(--display); letter-spacing: -0.02em; }
+        .metric-value.ok { color: var(--green); }
+        .metric-value.bad { color: #d6381a; }
+        .metric-value.blue { color: var(--blue); }
+        .metric-sub { margin-top: 2px; color: var(--muted); font-size: 12px; }
+        .metric-sub.ok { color: var(--green); }
+        .panel { padding: 20px; background: var(--card); border-radius: 28px; display: flex; flex-direction: column; gap: 12px; }
+        .panel-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 16px; }
+        .panel h3 { margin: 0; font: 800 17px var(--display); letter-spacing: -0.01em; }
+        .panel p { margin: 0; color: var(--muted); font-size: 13px; }
+        .legend { display: flex; gap: 12px; color: var(--muted); font-size: 12px; }
+        .legend i { display: inline-block; width: 10px; height: 10px; margin-right: 5px; border-radius: 3px; vertical-align: -1px; }
+        .bits { max-height: 144px; overflow-y: auto; padding: 10px; background: var(--bg); border-radius: 16px; color: var(--muted); font-size: 13px; }
+        .bit { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 26px; margin: 2px; border-radius: 6px; background: #fff; color: var(--muted); font: 500 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+        .bit-pre { background: var(--blue); color: #fff; }
+        .bit-flag { background: var(--ink); color: #fff; }
+        .bit-err { background: var(--orange); color: #fff; }
+        .formula { color: var(--blue); font: 500 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+        .chart-box { position: relative; height: 176px; width: 100%; }
+        .sliders { display: grid; grid-template-columns: 1fr; gap: 16px; font-size: 13px; }
+        @media (min-width: 480px) { .sliders { grid-template-columns: 1fr 1fr; } }
+        .sliders label { display: block; margin-bottom: 6px; color: var(--muted); }
+        .sliders b { color: var(--ink); }
+        .toggles { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 16px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 13px; }
+        .toggles select { width: auto; }
+        .checks { display: flex; gap: 16px; flex-wrap: wrap; }
+        .checks label { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+
+        @media (prefers-reduced-motion: reduce) {
+            .stage.live .bars i, .mic-btn.is-listening::before, .mic-btn.is-listening::after { animation: none; }
+            * { transition: none !important; }
         }
     </style>
 </head>
-<body class="min-h-screen flex flex-col items-center justify-start py-10 px-4">
+<body>
 
-    <div class="w-full max-w-xl space-y-6">
+    <main class="app">
 
-        <!-- Minimal App Header -->
-        <div class="text-center space-y-1">
-            <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-xs font-medium mb-1">
-                <span id="headerBadgeText">44.1 kHz | 4-FSK Turbo Acoustic Link</span>
-            </div>
-            <h1 class="text-2xl font-bold tracking-tight text-white">SonicDrop</h1>
-            <p class="text-xs text-slate-400">Send &amp; receive messages over sound waves without Wi-Fi or Bluetooth</p>
+        <div class="brand">
+            <svg viewBox="0 0 34 34" fill="var(--blue)" aria-hidden="true">
+                <rect x="2" y="13" width="4" height="8" rx="2"/><rect x="9" y="8" width="4" height="18" rx="2"/>
+                <rect x="16" y="2" width="4" height="30" rx="2"/><rect x="23" y="9" width="4" height="16" rx="2"/>
+                <rect x="30" y="14" width="3" height="6" rx="1.5"/>
+            </svg>
+            SonicDrop
         </div>
 
-        <!-- Segmented Tab Control -->
-        <div class="grid grid-cols-3 p-1 bg-slate-900/90 border border-slate-800 rounded-xl">
-            <button id="tabBtn-send" onclick="switchTab('send')"
-                    class="py-2 text-sm font-medium rounded-lg transition bg-indigo-600 text-white shadow">
-                Send
-            </button>
-            <button id="tabBtn-listen" onclick="switchTab('listen')"
-                    class="py-2 text-sm font-medium rounded-lg transition text-slate-400 hover:text-white">
-                Listen
-            </button>
-            <button id="tabBtn-details" onclick="switchTab('details')"
-                    class="py-2 text-sm font-medium rounded-lg transition text-slate-400 hover:text-white flex items-center justify-center gap-1.5">
-                <span>Signal Lab</span>
-                <span id="labBadge" class="hidden w-2 h-2 rounded-full bg-emerald-400"></span>
-            </button>
-        </div>
+        <header class="stage" id="stage">
+            <h1>Say it with sound.</h1>
+            <div class="bars" id="bars" aria-hidden="true"></div>
+            <div class="chip" id="headerBadgeText">44.1 kHz | 4-FSK Turbo Acoustic Link</div>
+        </header>
 
-        <!-- ========================================== -->
-        <!-- TAB 1: SEND MESSAGE (TRANSMITTER)          -->
-        <!-- ========================================== -->
-        <div id="tab-send" class="bg-slate-900/70 border border-slate-800/80 rounded-2xl p-6 space-y-4 shadow-xl">
+        <!-- TAB 1: SEND -->
+        <section id="tab-send" class="card">
             <div>
-                <label class="block text-xs font-medium text-slate-400 mb-2">Your Message</label>
-                <textarea id="inputText" rows="3" placeholder="Type your message here to beam via sound..."
-                          class="w-full bg-slate-950 border border-slate-800 rounded-xl p-4 text-white text-base focus:outline-none focus:border-indigo-500 resize-none"></textarea>
+                <label class="label" for="inputText">Your message</label>
+                <textarea id="inputText" rows="3" placeholder="Type something to send through the air"></textarea>
             </div>
 
-            <!-- Multi-Level Modulation Speed Option (4-FSK M=4 vs 2-FSK M=2) -->
-            <div class="flex items-center justify-between bg-slate-950 border border-slate-800/80 rounded-xl px-4 py-3">
+            <div class="opts">
                 <div>
-                    <div class="text-sm font-medium text-slate-200">Modulation Speed (Nyquist M)</div>
-                    <div class="text-xs text-slate-400">4-FSK sends 2 bits per tone + Shared HDLC Flags (3x faster)</div>
+                    <label class="label" for="levelsM">Speed</label>
+                    <select id="levelsM" onchange="broadcastSettings()">
+                        <option value="4" selected>Turbo (4-FSK)</option>
+                        <option value="2">Standard (2-FSK)</option>
+                    </select>
                 </div>
-                <select id="levelsM" onchange="broadcastSettings()" class="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-emerald-400 font-semibold focus:outline-none">
-                    <option value="4" selected>4-FSK Turbo (M=4, 2 bits/sym)</option>
-                    <option value="2">2-FSK Standard (M=2, 1 bit/sym)</option>
-                </select>
-            </div>
-
-            <!-- Delivery Mode Option -->
-            <div class="flex items-center justify-between bg-slate-950 border border-slate-800/80 rounded-xl px-4 py-3">
                 <div>
-                    <div class="text-sm font-medium text-slate-200">Receiver Display Mode</div>
-                    <div class="text-xs text-slate-400">Show each word live as it arrives, or wait for full message</div>
+                    <label class="label" for="deliveryMode">Receiver shows</label>
+                    <select id="deliveryMode">
+                        <option value="stream" selected>Word by word</option>
+                        <option value="full">Full message</option>
+                    </select>
                 </div>
-                <select id="deliveryMode" class="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none">
-                    <option value="stream" selected>Live Word-by-Word</option>
-                    <option value="full">Full Message at End</option>
-                </select>
-            </div>
-
-            <!-- Sound Mode Option -->
-            <div class="flex items-center justify-between bg-slate-950 border border-slate-800/80 rounded-xl px-4 py-3">
                 <div>
-                    <div class="text-sm font-medium text-slate-200">Sound Mode</div>
-                    <div class="text-xs text-slate-400">Choose audible tones or silent ultrasonic waves</div>
+                    <label class="label" for="carrierMode">Sound band</label>
+                    <select id="carrierMode" onchange="broadcastSettings()">
+                        <option value="audible">Audible</option>
+                        <option value="ultrasonic">Ultrasonic (silent)</option>
+                    </select>
                 </div>
-                <select id="carrierMode" onchange="broadcastSettings()" class="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none">
-                    <option value="audible">Audible Band</option>
-                    <option value="ultrasonic">Ultrasonic (Silent)</option>
-                </select>
             </div>
 
-            <button id="transmitBtn" onclick="runTransmission()"
-                    class="w-full py-3.5 bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white font-semibold rounded-xl shadow-lg shadow-indigo-600/20 transition flex items-center justify-center gap-2">
-                <span>Send via Sound</span>
-            </button>
+            <button id="transmitBtn" onclick="runTransmission()" class="btn">Send via sound</button>
 
-            <div id="playerCard" class="hidden bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-3">
-                <div class="flex items-center justify-between text-xs">
-                    <span id="playStatusLabel" class="text-emerald-400 font-medium">Audio Stream Ready &amp; Playing</span>
-                    <button onclick="switchTab('details')" class="text-indigo-400 hover:underline">
-                        View Technical Details &rarr;
-                    </button>
+            <div id="playerCard" class="hidden player">
+                <div class="player-top">
+                    <span id="playStatusLabel">Audio stream ready and playing</span>
+                    <button class="link" onclick="switchTab('details')">View details</button>
                 </div>
-                <audio id="audioPlayer" controls class="w-full h-9"></audio>
+                <audio id="audioPlayer" controls></audio>
             </div>
-        </div>
+        </section>
 
-        <!-- ========================================== -->
-        <!-- TAB 2: LISTEN (LIVE RECEIVER)              -->
-        <!-- ========================================== -->
-        <div id="tab-listen" class="hidden bg-slate-900/70 border border-slate-800/80 rounded-2xl p-8 text-center space-y-6 shadow-xl">
-            <div class="space-y-1">
-                <h2 class="text-base font-semibold text-white">Live Acoustic Receiver</h2>
-                <p id="otaStatusText" class="text-xs text-slate-400">
-                    Click Listen to start continuous real-time decoding over the air
-                </p>
+        <!-- TAB 2: LISTEN -->
+        <section id="tab-listen" class="hidden listen">
+            <div>
+                <h2>Listen for a message</h2>
+                <p id="otaStatusText">Tap the mic to start decoding in real time.</p>
             </div>
 
-            <div class="py-4 flex justify-center">
-                <button id="recordBtn" onclick="toggleMicRecording()"
-                        class="w-28 h-28 rounded-full bg-rose-600 hover:bg-rose-500 text-white font-semibold text-sm shadow-xl transition flex flex-col items-center justify-center gap-1">
-                    <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div class="sonar">
+                <button id="recordBtn" onclick="toggleMicRecording()" class="mic-btn">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                               d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"/>
                     </svg>
@@ -148,123 +207,113 @@
                 </button>
             </div>
 
-            <div class="bg-slate-950 border border-slate-800 rounded-xl p-5 text-left space-y-2">
-                <div class="flex items-center justify-between">
-                    <span class="text-[11px] font-medium text-slate-500 uppercase tracking-wider">Received Message</span>
-                    <span id="otaCrcBadge" class="text-[11px] px-2 py-0.5 rounded bg-slate-800 text-slate-400">Idle</span>
+            <div class="bubble">
+                <div class="bubble-head">
+                    <span>Received message</span>
+                    <span id="otaCrcBadge" class="badge">Idle</span>
                 </div>
-                <div id="otaDecodedText" class="text-lg font-medium text-white min-h-[1.75rem] break-words">
-                    —
-                </div>
-                <div id="otaFecNote" class="text-xs text-slate-500"></div>
+                <div id="otaDecodedText">—</div>
+                <div id="otaFecNote"></div>
             </div>
 
-            <div class="pt-2 border-t border-slate-800/80 flex justify-center">
-                <label class="text-xs text-slate-400 hover:text-indigo-400 cursor-pointer transition">
-                    Or upload a recorded .WAV file to decode
-                    <input id="wavFileInput" type="file" accept=".wav" class="hidden" onchange="uploadWavFile(this)">
-                </label>
-            </div>
-        </div>
+            <label class="upload">
+                Decode a recorded .wav file instead
+                <input id="wavFileInput" type="file" accept=".wav" class="hidden" onchange="uploadWavFile(this)">
+            </label>
+        </section>
 
-        <!-- ========================================== -->
-        <!-- TAB 3: SIGNAL LAB (TECHNICAL DETAILS)      -->
-        <!-- ========================================== -->
-        <div id="tab-details" class="hidden space-y-5">
-
-            <div class="grid grid-cols-2 gap-3">
-                <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
-                    <div class="text-xs text-slate-400">Signal Quality (SNR)</div>
-                    <div id="metricSnr" class="text-xl font-bold text-white mt-1">-- dB</div>
-                    <div id="metricBitRate" class="text-[11px] text-emerald-400 font-mono mt-0.5">Effective Rate: -- bps</div>
+        <!-- TAB 3: SIGNAL LAB -->
+        <section id="tab-details" class="hidden lab">
+            <div class="metrics">
+                <div class="metric">
+                    <div class="metric-label">Signal quality (SNR)</div>
+                    <div id="metricSnr" class="metric-value">-- dB</div>
+                    <div id="metricBitRate" class="metric-sub ok">Effective rate: -- bps</div>
                 </div>
-                <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
-                    <div class="text-xs text-slate-400">Shannon Max Speed</div>
-                    <div id="metricShannon" class="text-xl font-bold text-indigo-400 mt-1">-- bps</div>
-                    <div id="metricNyquist" class="text-[11px] text-slate-500 mt-0.5">Nyquist: -- bps</div>
+                <div class="metric">
+                    <div class="metric-label">Shannon limit</div>
+                    <div id="metricShannon" class="metric-value blue">-- bps</div>
+                    <div id="metricNyquist" class="metric-sub">Nyquist: -- bps</div>
                 </div>
-                <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
-                    <div class="text-xs text-slate-400">Hamming(7,4) Auto-Repair</div>
-                    <div id="metricFec" class="text-xl font-bold text-emerald-400 mt-1">0 Bits Fixed</div>
-                    <div id="metricBer" class="text-[11px] text-slate-500 mt-0.5">BER: 0.0</div>
+                <div class="metric">
+                    <div class="metric-label">Hamming(7,4) repairs</div>
+                    <div id="metricFec" class="metric-value ok">0 Bits Fixed</div>
+                    <div id="metricBer" class="metric-sub">BER: 0.0</div>
                 </div>
-                <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
-                    <div class="text-xs text-slate-400">CRC-8 Frame Check</div>
-                    <div id="metricCrc" class="text-xl font-bold text-white mt-1">--</div>
-                    <div id="metricFrameLen" class="text-[11px] text-slate-500 mt-0.5">Total Stream: -- bits</div>
+                <div class="metric">
+                    <div class="metric-label">CRC-8 frame check</div>
+                    <div id="metricCrc" class="metric-value">--</div>
+                    <div id="metricFrameLen" class="metric-sub">Total stream: -- bits</div>
                 </div>
             </div>
 
-            <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-3">
-                <div class="flex items-center justify-between">
-                    <h3 class="text-sm font-semibold text-white">HDLC Shared-Flag Frame Bits</h3>
-                    <div class="flex gap-3 text-[11px] text-slate-400">
-                        <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-sky-600"></span> Preamble</span>
-                        <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-purple-600"></span> HDLC Flag</span>
-                        <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-rose-600"></span> Repaired Error</span>
+            <div class="panel">
+                <div class="panel-head">
+                    <h3>Frame bits</h3>
+                    <div class="legend">
+                        <span><i style="background:var(--blue)"></i>Preamble</span>
+                        <span><i style="background:var(--ink)"></i>HDLC flag</span>
+                        <span><i style="background:var(--orange)"></i>Repaired</span>
                     </div>
                 </div>
-                <p id="frameSummaryText" class="text-xs text-slate-400">Send or receive a message to inspect the binary frame.</p>
-                <div id="bitInspectorContainer" class="bg-slate-950 border border-slate-800 rounded-lg p-3 max-h-36 overflow-y-auto">
-                    <span class="text-xs text-slate-500">No frame data yet.</span>
-                </div>
+                <p id="frameSummaryText">Send or receive a message to inspect the binary frame.</p>
+                <div id="bitInspectorContainer" class="bits">No frame data yet.</div>
             </div>
 
-            <div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
-                <div class="flex items-center justify-between mb-3">
-                    <h3 class="text-sm font-semibold text-white">Modulated M-FSK Sound Wave (Symbol Transition)</h3>
-                    <span class="text-[11px] font-mono text-indigo-400">Rb = Rs &times; log2(M)</span>
+            <div class="panel">
+                <div class="panel-head">
+                    <h3>Sound wave</h3>
+                    <span class="formula">Rb = Rs &times; log2(M)</span>
                 </div>
-                <div class="relative h-44 w-full">
-                    <canvas id="waveformChart"></canvas>
-                </div>
+                <div class="chart-box"><canvas id="waveformChart"></canvas></div>
             </div>
 
-            <div class="bg-slate-900/60 border border-slate-800 rounded-xl p-5 space-y-4">
-                <h3 class="text-sm font-semibold text-white">Lab Simulation Settings (Synced Across Tabs)</h3>
-
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+            <div class="panel">
+                <div class="panel-head">
+                    <h3>Simulation settings</h3>
+                    <p>Synced across tabs</p>
+                </div>
+                <div class="sliders">
                     <div>
-                        <label class="text-slate-400 block mb-1">
-                            Symbol Rate (Rs): <span id="baudValue" class="text-white font-mono">65</span> Baud
-                        </label>
+                        <label for="baudRate">Symbol rate: <b><span id="baudValue">65</span> baud</b></label>
                         <input id="baudRate" type="range" min="25" max="110" step="5" value="65"
-                               oninput="document.getElementById('baudValue').innerText = this.value; broadcastSettings();"
-                               class="w-full accent-indigo-500">
+                               oninput="document.getElementById('baudValue').innerText = this.value; broadcastSettings();">
                     </div>
                     <div>
-                        <label class="text-slate-400 block mb-1">
-                            Simulated Room Noise: <span id="noiseValue" class="text-white font-mono">0.05</span>
-                        </label>
+                        <label for="noiseStd">Room noise: <b><span id="noiseValue">0.05</span></b></label>
                         <input id="noiseStd" type="range" min="0.00" max="0.60" step="0.05" value="0.05"
-                               oninput="document.getElementById('noiseValue').innerText = parseFloat(this.value).toFixed(2)"
-                               class="w-full accent-indigo-500">
+                               oninput="document.getElementById('noiseValue').innerText = parseFloat(this.value).toFixed(2)">
                     </div>
                 </div>
-
-                <div class="flex flex-wrap items-center justify-between gap-4 pt-2 border-t border-slate-800 text-xs">
-                    <div class="flex items-center gap-4">
-                        <label class="inline-flex items-center gap-1.5 cursor-pointer">
-                            <input id="useHamming" type="checkbox" checked onchange="broadcastSettings()" class="accent-indigo-500 rounded">
-                            <span>Hamming(7,4) FEC</span>
-                        </label>
-                        <label class="inline-flex items-center gap-1.5 cursor-pointer">
-                            <input id="useRle" type="checkbox" onchange="broadcastSettings()" class="accent-indigo-500 rounded">
-                            <span>RLE Compression</span>
-                        </label>
+                <div class="toggles">
+                    <div class="checks">
+                        <label><input id="useHamming" type="checkbox" checked onchange="broadcastSettings()"> Hamming(7,4) FEC</label>
+                        <label><input id="useRle" type="checkbox" onchange="broadcastSettings()"> RLE compression</label>
                     </div>
-                    <select id="errorMode" class="bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-white">
-                        <option value="single">Test: Flip 1 Bit</option>
-                        <option value="multiple" selected>Test: Flip 3 Bits</option>
-                        <option value="burst">Test: Burst Error</option>
-                        <option value="none">No Artificial Bit Flips</option>
+                    <select id="errorMode">
+                        <option value="single">Test: flip 1 bit</option>
+                        <option value="multiple" selected>Test: flip 3 bits</option>
+                        <option value="burst">Test: burst error</option>
+                        <option value="none">No artificial bit flips</option>
                     </select>
                 </div>
             </div>
+        </section>
 
-        </div>
+    </main>
 
-    </div>
+    <nav class="dock" aria-label="Sections">
+        <button id="tabBtn-send" onclick="switchTab('send')" class="tab active">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg><span class="label">Send</span>
+        </button>
+        <button id="tabBtn-listen" onclick="switchTab('listen')" class="tab">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3zM19 11a7 7 0 0 1-14 0M12 18v4"/></svg><span class="label">Listen</span>
+        </button>
+        <button id="tabBtn-details" onclick="switchTab('details')" class="tab">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg><span class="label">Signal lab</span>
+            <span id="labBadge" class="hidden dot-badge"></span>
+        </button>
+    </nav>
 
     <script>
         let waveChart = null;
@@ -367,21 +416,21 @@
                     ? `Message complete (${countLabel} packets decoded live at ${bitRateBps || 130} bps)!`
                     : `Streaming live word-by-word (${countLabel} decoded)...`;
                 badge.innerText = currentMsgComplete ? 'Stream Complete (CRC-8 OK)' : `Packet ${countLabel} Live`;
-                badge.className = 'text-[11px] px-2 py-0.5 rounded font-medium bg-emerald-500/20 text-emerald-400';
+                badge.className = 'badge badge-ok';
             } else {
                 if (currentMsgComplete) {
                     document.getElementById('otaDecodedText').innerText = fullSentenceSoFar;
                     document.getElementById('otaStatusText').innerText =
                         `Full message received (${countLabel} blocks reassembled)!`;
                     badge.innerText = 'Full Message Verified';
-                    badge.className = 'text-[11px] px-2 py-0.5 rounded font-medium bg-emerald-500/20 text-emerald-400';
+                    badge.className = 'badge badge-ok';
                 } else {
                     document.getElementById('otaDecodedText').innerText =
                         `[Buffering high-speed packets: ${countLabel} received...]`;
                     document.getElementById('otaStatusText').innerText =
                         'Sender selected "Full Message at End" — buffering until final HDLC flag...';
                     badge.innerText = `Buffering ${countLabel}`;
-                    badge.className = 'text-[11px] px-2 py-0.5 rounded font-medium bg-amber-500/20 text-amber-400';
+                    badge.className = 'badge badge-warn';
                 }
             }
 
@@ -405,11 +454,11 @@
             ['send', 'listen', 'details'].forEach(t => {
                 document.getElementById('tab-' + t).classList.add('hidden');
                 const btn = document.getElementById('tabBtn-' + t);
-                btn.className = 'py-2 text-sm font-medium rounded-lg transition text-slate-400 hover:text-white flex items-center justify-center gap-1.5';
+                btn.className = 'tab';
             });
             document.getElementById('tab-' + tabName).classList.remove('hidden');
             document.getElementById('tabBtn-' + tabName).className =
-                'py-2 text-sm font-medium rounded-lg transition bg-indigo-600 text-white shadow flex items-center justify-center gap-1.5';
+                'tab active';
 
             if (tabName === 'details') {
                 document.getElementById('labBadge').classList.add('hidden');
@@ -428,8 +477,8 @@
                     datasets: [{
                         label: 'FSK Audio Wave',
                         data: [],
-                        borderColor: '#6366f1',
-                        backgroundColor: 'rgba(99, 102, 241, 0.08)',
+                        borderColor: '#3a3aff',
+                        backgroundColor: 'rgba(58, 58, 255, 0.08)',
                         fill: true,
                         borderWidth: 1.8,
                         pointRadius: 0,
@@ -443,7 +492,7 @@
                     plugins: { legend: { display: false } },
                     scales: {
                         x: { display: false },
-                        y: { min: -1.1, max: 1.1, grid: { color: '#1e293b' } }
+                        y: { min: -1.1, max: 1.1, grid: { color: '#e3e7f1' }, ticks: { color: '#8a93ad' } }
                     }
                 }
             });
@@ -464,7 +513,7 @@
             document.getElementById('metricFec').innerText = f.corrected_count + ' Bits Fixed';
             document.getElementById('metricBer').innerText = `Bit Error Rate (BER): ${f.ber}`;
             document.getElementById('metricCrc').innerText = f.crc_passed ? 'Valid (Passed)' : 'Corrupted';
-            document.getElementById('metricCrc').className = 'text-xl font-bold mt-1 ' + (f.crc_passed ? 'text-emerald-400' : 'text-rose-400');
+            document.getElementById('metricCrc').className = 'metric-value ' + (f.crc_passed ? 'ok' : 'bad');
             document.getElementById('metricFrameLen').innerText = `Total Stream: ${fr.total_frame_len} bits`;
 
             document.getElementById('frameSummaryText').innerText =
@@ -548,18 +597,18 @@
             for (let i = 0; i < rxBits.length; i++) {
                 const span = document.createElement('span');
                 span.innerText = rxBits[i];
-                let bg = 'bg-slate-800 text-slate-300';
+                let bg = 'bit';
 
                 if (i < 8) {
-                    bg = 'bg-sky-600 text-white font-bold';
+                    bg = 'bit bit-pre';
                 } else if (i >= 8 && i < 16) {
-                    bg = 'bg-purple-600 text-white font-bold';
+                    bg = 'bit bit-flag';
                 } else if (flipSet.has(i) || txBits[i] !== rxBits[i]) {
-                    bg = 'bg-rose-600 text-white font-bold';
+                    bg = 'bit bit-err';
                     span.title = `Bit #${i} flipped in channel and repaired by Hamming(7,4)`;
                 }
 
-                span.className = `bit-pill ${bg}`;
+                span.className = bg;
                 container.appendChild(span);
             }
         }
@@ -611,11 +660,11 @@
                 source.connect(scriptProcessor);
                 scriptProcessor.connect(audioCtx.destination);
 
-                btn.classList.add('listening-pulse', 'bg-amber-600');
+                btn.classList.add('is-listening');
                 label.innerText = 'Stop';
                 statusText.innerText = 'Listening live for M-FSK sound waves...';
                 badge.innerText = 'Listening Live...';
-                badge.className = 'text-[11px] px-2 py-0.5 rounded font-medium bg-indigo-500/20 text-indigo-400';
+                badge.className = 'badge badge-live';
 
                 livePollTimer = setInterval(pollLiveDecode, 850);
 
@@ -646,7 +695,7 @@
                 mediaStream = null;
             }
 
-            btn.classList.remove('listening-pulse', 'bg-amber-600');
+            btn.classList.remove('is-listening');
             label.innerText = 'Listen';
 
             if (recordedBuffers.length > 5 && audioCtx) {
@@ -668,7 +717,7 @@
             statusText.innerText = 'Receiver stopped. Click Listen anytime to start again.';
             if (badge.innerText === 'Listening Live...') {
                 badge.innerText = 'Paused';
-                badge.className = 'text-[11px] px-2 py-0.5 rounded bg-slate-800 text-slate-400';
+                badge.className = 'badge';
             }
         }
 
@@ -770,7 +819,7 @@
                 } else if (!isSilentPoll) {
                     document.getElementById('otaStatusText').innerText = data.error || 'No valid frame detected in file.';
                     badge.innerText = 'No Frame';
-                    badge.className = 'text-[11px] px-2 py-0.5 rounded bg-rose-500/20 text-rose-400';
+                    badge.className = 'badge badge-err';
                 }
             } catch (err) {
                 if (!isSilentPoll) {
@@ -784,6 +833,30 @@
             initChart();
             updateHeaderBadge();
         };
+    </script>
+
+    <!-- Visual-only: animated bars on the header stage. Does not touch app logic. -->
+    <script>
+        (function () {
+            const stage = document.getElementById('stage');
+            const bars = document.getElementById('bars');
+            for (let i = 0; i < 28; i++) {
+                const el = document.createElement('i');
+                const h = 18 + Math.abs(Math.sin(i * 0.62) * Math.cos(i * 0.21)) * 82;
+                el.style.setProperty('--h', h.toFixed(0));
+                el.style.setProperty('--d', (-(i % 7) * 0.13).toFixed(2) + 's');
+                bars.appendChild(el);
+            }
+            const setLive = (on) => stage.classList.toggle('live', on);
+            const audio = document.getElementById('audioPlayer');
+            const mic = document.getElementById('recordBtn');
+            let playing = false, listening = false;
+            const sync = () => setLive(playing || listening);
+            audio.addEventListener('play', () => { playing = true; sync(); });
+            ['pause', 'ended'].forEach(ev => audio.addEventListener(ev, () => { playing = false; sync(); }));
+            new MutationObserver(() => { listening = mic.classList.contains('is-listening'); sync(); })
+                .observe(mic, { attributes: true, attributeFilter: ['class'] });
+        })();
     </script>
 </body>
 </html>
