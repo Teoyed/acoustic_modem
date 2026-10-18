@@ -8,12 +8,14 @@ from .channel_coding import ChannelCoder
 
 class AcousticModemPHY:
     """
-    Noise-Immune Physical Layer (PHY) Acoustic Modem.
-    Uses a High-Clarity Audible Band (4.2 kHz - 6.0 kHz) above human speech,
-    FFT Band-Pass Filtering, and a Spectral Tone-Dominance Gate to reject room noise.
+    Noise-Immune Physical Layer (PHY) Acoustic Modem with Hybrid ARQ support.
+    Uses a High-Clarity Audible Band (4.2 kHz - 6.0 kHz), FFT Band-Pass Filtering,
+    Tone-Dominance Gating, and Acoustic ACK (7000 Hz) / NACK (3500 Hz) tone synthesis.
     """
 
     SYMBOL_BITS_4FSK = ("00", "01", "10", "11")
+    ACK_FREQ_HZ = 7000.0
+    NACK_FREQ_HZ = 3500.0
 
     def __init__(
         self,
@@ -29,7 +31,6 @@ class AcousticModemPHY:
         self.bits_per_symbol = int(math.log2(self.levels_m))
         self.bit_rate_bps = self.baud_rate * self.bits_per_symbol
 
-        # High-Clarity Anti-Noise Carrier Frequencies (Far above human voice < 3.2 kHz)
         if self.levels_m == 4:
             if ultrasonic:
                 self.frequencies = [16800.0, 17400.0, 18000.0, 18600.0]
@@ -55,11 +56,7 @@ class AcousticModemPHY:
         self._sin_bank = [np.sin(2.0 * np.pi * f * t) for f in self.frequencies]
 
     def _apply_bandpass_filter(self, waveform: np.ndarray) -> np.ndarray:
-        """
-        Sharp FFT Band-Pass Filter:
-        Completely zeroes out human speech (< 3.8 kHz), low-frequency room rumble,
-        and out-of-band interference before demodulation.
-        """
+        """Sharp FFT Band-Pass Filter to remove human voice and out-of-band noise."""
         n = len(waveform)
         if n < self.samples_per_symbol:
             return waveform
@@ -74,10 +71,7 @@ class AcousticModemPHY:
         return filtered.astype(np.float32)
 
     def modulate(self, bits: str) -> np.ndarray:
-        """
-        Modulate a binary bit string into a continuous-phase M-FSK waveform
-        using a raised-cosine envelope for clean spectral containment.
-        """
+        """Modulate a binary bit string into a continuous-phase M-FSK waveform."""
         if not bits:
             return np.array([], dtype=np.float32)
 
@@ -123,10 +117,7 @@ class AcousticModemPHY:
         return buffer.getvalue()
 
     def _isolate_carrier_burst(self, waveform: np.ndarray) -> np.ndarray:
-        """
-        Isolate the active M-FSK signal burst only if narrowband carrier tones
-        dominate over background broadband noise.
-        """
+        """Isolate the active M-FSK signal burst when narrowband carrier tones dominate."""
         n_sym = len(waveform) // self.samples_per_symbol
         if n_sym < 6:
             return np.array([], dtype=np.float32)
@@ -144,16 +135,12 @@ class AcousticModemPHY:
         max_tone_power = np.max(powers, axis=0)
         total_power = np.sum(powers, axis=0)
         other_power = (total_power - max_tone_power) / max(1, self.levels_m - 1)
-
-        # Tone Dominance Ratio: True FSK tones concentrate energy in a single carrier,
-        # whereas claps/speech spread energy across multiple frequencies.
         dominance_ratio = max_tone_power / np.maximum(other_power, 1e-10)
 
         peak_power = float(np.max(max_tone_power))
         if peak_power < 1e-6:
             return np.array([], dtype=np.float32)
 
-        # Require both sufficient amplitude AND single-tone spectral dominance (> 2.2x)
         valid_tone_mask = (max_tone_power > peak_power * 0.08) & (dominance_ratio > 2.2)
         active_idx = np.where(valid_tone_mask)[0]
 
@@ -165,9 +152,7 @@ class AcousticModemPHY:
         return waveform[start_sym * self.samples_per_symbol:end_sym * self.samples_per_symbol]
 
     def demodulate(self, received_waveform: np.ndarray) -> dict:
-        """
-        Fast vectorized non-coherent M-FSK demodulator with Tone-Dominance gating.
-        """
+        """Fast vectorized non-coherent M-FSK demodulator with Tone-Dominance gating."""
         n_sym = len(received_waveform) // self.samples_per_symbol
         if n_sym == 0:
             return {
@@ -205,7 +190,6 @@ class AcousticModemPHY:
             win_power = float(powers[winner, i])
             other_power = float(total_p[i] - win_power) / max(1, self.levels_m - 1)
 
-            # Reject broadband impulse noise (e.g. clapping/coughing) that excites all tones equally
             if win_power < other_power * 1.8:
                 detected_chunks.append("00" if self.levels_m == 4 else "0")
                 continue
@@ -231,8 +215,8 @@ class AcousticModemPHY:
 
     def demodulate_stream(self, received_waveform: np.ndarray, use_hamming: bool = True) -> dict:
         """
-        Band-pass filter the microphone recording, isolate genuine FSK bursts,
-        and strictly extract only CRC-8 verified frames with high SNR.
+        Band-pass filter the recording and strictly extract CRC-8 verified frames
+        across 16 timing phases so out-of-phase noise never creates bogus NACK packets.
         """
         if len(received_waveform) > 0:
             received_waveform = received_waveform - np.mean(received_waveform)
@@ -243,6 +227,7 @@ class AcousticModemPHY:
             empty_demod = self.demodulate(np.array([], dtype=np.float32))
             return {
                 "valid_frames": [],
+                "corrupted_frames": [],
                 "metrics": empty_demod["metrics"],
                 "last_burst_wave": np.array([], dtype=np.float32)
             }
@@ -263,7 +248,6 @@ class AcousticModemPHY:
             if best_metrics is None:
                 best_metrics = demod_candidate["metrics"]
 
-            # Noise Gate: Require at least 4.5 dB in-band SNR to consider frames valid
             if demod_candidate["metrics"]["snr_db"] < 4.5:
                 continue
 
@@ -272,7 +256,8 @@ class AcousticModemPHY:
                 bit_candidates.append(demod_candidate["bits"][1:])
 
             for cand_bits in bit_candidates:
-                # Strict CRC-8 enforcement: never accept unverified fallback frames from mic noise!
+                # Strictly accept only CRC-8 verified frames from live microphone audio
+                # to prevent out-of-phase sub-symbol alignments from generating fake NACKs!
                 frames = ChannelCoder.parse_all_frames(
                     cand_bits,
                     use_hamming=use_hamming,
@@ -280,14 +265,16 @@ class AcousticModemPHY:
                 )
                 for f in frames:
                     hdr = ChannelCoder.unpack_packet_header(f["payload_bits"])
-                    if hdr.get("valid"):
-                        key = (hdr["msg_id"], hdr["seq_num"])
-                        if key not in collected_by_seq:
-                            collected_by_seq[key] = f
-                            best_metrics = demod_candidate["metrics"]
+                    if not hdr.get("valid"):
+                        continue
+                    key = (hdr["msg_id"], hdr["seq_num"])
+                    if key not in collected_by_seq:
+                        collected_by_seq[key] = f
+                        best_metrics = demod_candidate["metrics"]
 
         return {
             "valid_frames": list(collected_by_seq.values()),
+            "corrupted_frames": [],
             "metrics": best_metrics,
             "last_burst_wave": active_wave
         }

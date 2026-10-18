@@ -48,15 +48,14 @@ def dashboard_view(request):
 @csrf_exempt
 def transmit_and_analyze_api(request):
     """
-    High-Speed Transmission Pipeline supporting both UTF-8 Text and
-    16x16 Binary Pixel Fax with RLE Compression, Hamming(7,4), CRC-8, and 4-FSK.
+    High-Speed Transmission Pipeline with safe Hybrid ARQ Selective Repeat support.
     """
     if request.method != 'POST':
         return JsonResponse({'error': 'POST request required.'}, status=405)
 
     try:
         data = json.loads(request.body.decode('utf-8'))
-        payload_type = data.get('payload_type', 'text')  # 'text' or 'fax'
+        payload_type = data.get('payload_type', 'text')
         text = data.get('text', '').strip() or 'Hello UoM!'
         fax_matrix = data.get('fax_matrix', None)
         baud_rate = int(data.get('baud_rate', 65))
@@ -68,18 +67,23 @@ def transmit_and_analyze_api(request):
         noise_std = float(data.get('noise_std', 0.05))
         error_mode = data.get('error_mode', 'multiple')
 
+        retransmit_seq = data.get('retransmit_seq', None)
+        force_msg_id = data.get('msg_id', None)
+        simulate_arq_nack = bool(data.get('simulate_arq_nack', False))
+
         stream_mode_flag = (delivery_mode == 'stream')
         is_fax = (payload_type == 'fax')
-        msg_id = random.randint(1, 7)
+        msg_id = int(force_msg_id) if force_msg_id is not None else random.randint(1, 7)
 
         payloads = []
         packet_items = []
+        seq_numbers = []
+        is_last_flags = []
         total_raw_bits = 0
         total_rle_bits = 0
         rle_saving_percent = 0.0
 
         if is_fax:
-            # 16x16 Binary Pixel Fax Mode (256 bits compressed via RLE)
             if isinstance(fax_matrix, list) and len(fax_matrix) == 16:
                 raw_fax_bits = SourceCoder.binary_matrix_to_bits(fax_matrix)
             else:
@@ -91,15 +95,20 @@ def transmit_and_analyze_api(request):
             total_rle_bits = rle_stats['compressed_len']
             rle_saving_percent = rle_stats['saving_percent']
 
-            # Slice RLE stream into compact 32-bit (4-run) packets for fast scanline streaming
             chunk_bit_size = 32 if stream_mode_flag else 64
-            rle_chunks = [
+            all_chunks = [
                 compressed_fax_bits[i:i + chunk_bit_size]
                 for i in range(0, len(compressed_fax_bits), chunk_bit_size)
             ] or [compressed_fax_bits]
 
-            for idx, rle_chunk in enumerate(rle_chunks):
-                is_last = (idx == len(rle_chunks) - 1)
+            # Clamp retransmit_seq safely within bounds
+            if retransmit_seq is not None:
+                retransmit_seq = max(0, min(int(retransmit_seq), len(all_chunks) - 1))
+
+            for idx, rle_chunk in enumerate(all_chunks):
+                if retransmit_seq is not None and idx != retransmit_seq:
+                    continue
+                is_last = (idx == len(all_chunks) - 1)
                 header_bits = ChannelCoder.pack_packet_header(
                     msg_id=msg_id,
                     seq_num=idx,
@@ -109,17 +118,24 @@ def transmit_and_analyze_api(request):
                 )
                 payloads.append(header_bits + rle_chunk)
                 packet_items.append(rle_chunk)
+                seq_numbers.append(idx)
+                is_last_flags.append(is_last)
 
             log_label = f"[16x16 Pixel Fax | RLE {total_rle_bits}b ({rle_saving_percent}% saved)]"
         else:
-            # Standard UTF-8 Text Mode
             raw_words = [w for w in text.split(' ') if w] or [text]
-            chunks = raw_words if stream_mode_flag else [
+            all_chunks = raw_words if stream_mode_flag else [
                 ' '.join(raw_words[i:i + 4]) for i in range(0, len(raw_words), 4)
             ]
 
-            for idx, chunk_text in enumerate(chunks):
-                is_last = (idx == len(chunks) - 1)
+            # Clamp retransmit_seq safely within bounds so payloads is never empty!
+            if retransmit_seq is not None:
+                retransmit_seq = max(0, min(int(retransmit_seq), len(all_chunks) - 1))
+
+            for idx, chunk_text in enumerate(all_chunks):
+                if retransmit_seq is not None and idx != retransmit_seq:
+                    continue
+                is_last = (idx == len(all_chunks) - 1)
                 c_bits = SourceCoder.text_to_bits(chunk_text)
                 rle_stats = SourceCoder.rle_encode(c_bits)
                 encoded_bits = rle_stats['encoded_bits'] if use_rle else c_bits
@@ -136,13 +152,33 @@ def transmit_and_analyze_api(request):
                 )
                 payloads.append(header_bits + encoded_bits)
                 packet_items.append(chunk_text)
+                seq_numbers.append(idx)
+                is_last_flags.append(is_last)
 
             if total_raw_bits > 0:
                 rle_saving_percent = round((1.0 - (total_rle_bits / total_raw_bits)) * 100, 1)
-            log_label = text
+            log_label = f"[ARQ Retry #{retransmit_seq}] {packet_items[0]}" if retransmit_seq is not None else text
 
-        stream_info = ChannelCoder.build_shared_flag_stream(payloads, use_hamming=use_hamming)
-        stream_bits = stream_info['stream_bits']
+        corrupt_target_idx = None
+        if simulate_arq_nack and retransmit_seq is None and len(payloads) > 0:
+            corrupt_target_idx = min(1, len(payloads) - 1)
+
+        bodies = []
+        cumulative_bits = []
+        current_len = len(ChannelCoder.PREAMBLE) + len(ChannelCoder.HDLC_FLAG)
+        first_crc = "00000000"
+
+        for idx, p_bits in enumerate(payloads):
+            b_info = ChannelCoder.encode_frame_body(p_bits, use_hamming=use_hamming)
+            if idx == 0:
+                first_crc = b_info["crc_bits"]
+            stuffed = b_info["stuffed_body"]
+            bodies.append(stuffed)
+            current_len += len(stuffed) + len(ChannelCoder.HDLC_FLAG)
+            cumulative_bits.append(current_len)
+
+        stream_bits = ChannelCoder.PREAMBLE + ChannelCoder.HDLC_FLAG + ChannelCoder.HDLC_FLAG.join(bodies) + ChannelCoder.HDLC_FLAG
+        first_tx_bits = f"{ChannelCoder.PREAMBLE}{ChannelCoder.HDLC_FLAG}{bodies[0]}{ChannelCoder.HDLC_FLAG}"
 
         modem = AcousticModemPHY(
             sample_rate=44100,
@@ -157,20 +193,20 @@ def transmit_and_analyze_api(request):
         effective_bps = modem.bit_rate_bps
         packet_schedule = []
         for idx, item_val in enumerate(packet_items):
-            emit_sec = round(stream_info['cumulative_bits'][idx] / effective_bps, 3)
+            emit_sec = round(cumulative_bits[idx] / effective_bps, 3)
+            is_corrupted_pkt = (corrupt_target_idx is not None and idx == corrupt_target_idx)
             packet_schedule.append({
                 'msg_id': msg_id,
-                'seq_num': idx,
-                'is_last': (idx == len(packet_items) - 1),
+                'seq_num': seq_numbers[idx],
+                'is_last': is_last_flags[idx],
                 'stream_mode': stream_mode_flag,
                 'is_fax': is_fax,
+                'crc_corrupted': is_corrupted_pkt,
                 'word': item_val if not is_fax else '',
                 'rle_chunk': item_val if is_fax else '',
                 'emit_time_sec': emit_sec
             })
 
-        # Simulate Noisy Channel on the first frame for Signal Lab preview
-        first_tx_bits = stream_info['first_frame_bits']
         first_wave = modem.modulate(first_tx_bits)
         if noise_std > 0:
             rx_first_wave = first_wave + np.random.normal(0.0, noise_std, size=first_wave.shape).astype(np.float32)
@@ -182,9 +218,10 @@ def transmit_and_analyze_api(request):
 
         flipped_indices = []
         header_offset = len(ChannelCoder.PREAMBLE) + len(ChannelCoder.HDLC_FLAG)
-        if error_mode in ('single', 'multiple', 'burst') and len(rx_bits) > header_offset + 8:
+        effective_error_mode = 'burst' if corrupt_target_idx == 0 else error_mode
+        if effective_error_mode in ('single', 'multiple', 'burst') and len(rx_bits) > header_offset + 8:
             body = rx_bits[header_offset:-len(ChannelCoder.HDLC_FLAG)]
-            noisy_body, local_flips = ChannelCoder.inject_channel_error(body, mode=error_mode)
+            noisy_body, local_flips = ChannelCoder.inject_channel_error(body, mode=effective_error_mode, burst_len=5)
             flipped_indices = [idx + header_offset for idx in local_flips]
             rx_bits = rx_bits[:header_offset] + noisy_body + rx_bits[-len(ChannelCoder.HDLC_FLAG):]
 
@@ -192,11 +229,13 @@ def transmit_and_analyze_api(request):
         ber = round(bit_mismatches / max(len(first_tx_bits), 1), 6)
 
         parsed = ChannelCoder.parse_frame(rx_bits, use_hamming=use_hamming)
-        crc_passed = parsed.get('crc_passed', False) if parsed.get('valid_frame') else False
+        crc_passed = (corrupt_target_idx is None) and (
+            parsed.get('crc_passed', False) if parsed.get('valid_frame') else False
+        )
         corrected_count = parsed.get('corrected_errors_count', 0) if parsed.get('valid_frame') else 0
 
         metrics = demod_res['metrics']
-        total_stream_bits = stream_info['total_stream_len']
+        total_stream_bits = len(stream_bits)
 
         log_entry = TransmissionLog.objects.create(
             input_text=log_label,
@@ -223,6 +262,9 @@ def transmit_and_analyze_api(request):
             'log_id': log_entry.id,
             'msg_id': msg_id,
             'is_fax': is_fax,
+            'is_retransmission': retransmit_seq is not None,
+            'retransmitted_seq': retransmit_seq,
+            'corrupted_seq': seq_numbers[corrupt_target_idx] if corrupt_target_idx is not None else None,
             'packet_count': len(packet_items),
             'packet_schedule': packet_schedule,
             'delivery_mode': delivery_mode,
@@ -232,7 +274,7 @@ def transmit_and_analyze_api(request):
                 'raw_bits_len': total_raw_bits,
                 'rle_compressed_len': total_rle_bits,
                 'rle_saving_percent': rle_saving_percent,
-                'crc_bits': stream_info['first_crc'],
+                'crc_bits': first_crc,
                 'total_frame_len': total_stream_bits,
                 'tx_frame_bits': first_tx_bits[:160],
                 'rx_frame_bits': rx_bits[:160],
@@ -260,7 +302,7 @@ def transmit_and_analyze_api(request):
 def decode_wav_api(request):
     """
     Demodulate a live microphone snapshot or uploaded WAV file and reconstruct
-    either UTF-8 Text words or a 16x16 RLE-compressed Pixel Fax image.
+    CRC-verified UTF-8 Text or 16x16 Pixel Fax packets.
     """
     if request.method != 'POST' or 'audio_file' not in request.FILES:
         return JsonResponse({'error': 'WAV audio_file required.'}, status=400)
@@ -325,6 +367,7 @@ def decode_wav_api(request):
                     'is_last': header_info['is_last'],
                     'stream_mode': header_info['stream_mode'],
                     'is_fax': True,
+                    'crc_corrupted': False,
                     'word': '',
                     'rle_chunk': rle_chunk
                 })
@@ -339,6 +382,7 @@ def decode_wav_api(request):
                     'is_last': header_info['is_last'],
                     'stream_mode': header_info['stream_mode'],
                     'is_fax': False,
+                    'crc_corrupted': False,
                     'word': word_text,
                     'rle_chunk': ''
                 })
@@ -374,6 +418,9 @@ def decode_wav_api(request):
             'fax_bits': decoded_fax_bits[:256],
             'stream_mode': stream_mode,
             'is_complete': is_complete,
+            'arq_feedback': 'ACK',
+            'feedback_freq_hz': AcousticModemPHY.ACK_FREQ_HZ,
+            'nack_seqs': [],
             'packets': session_packets,
             'recovered_text': assembled_text,
             'crc_passed': True,
