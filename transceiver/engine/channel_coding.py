@@ -6,7 +6,7 @@ class ChannelCoder:
     """
     Channel Coding and Data Link Layer Framing module.
     Includes CRC-8 error detection, Hamming(7,4) Forward Error Correction (FEC),
-    HDLC framing with shared flags, packet sequence headers, and error injection.
+    HDLC framing with shared flags, packet sequence headers (Text & Fax), and error injection.
     """
     PREAMBLE = "10101010"      # 1-byte alternating preamble for receiver synchronization
     HDLC_FLAG = "01111110"     # Standard HDLC frame delimiter flag (0x7E)
@@ -143,27 +143,35 @@ class ChannelCoder:
         msg_id: int,
         seq_num: int,
         is_last: bool,
-        stream_mode: bool
+        stream_mode: bool,
+        is_fax: bool = False
     ) -> str:
-        """Build a 12-bit Data Link packet header."""
+        """
+        Build a 12-bit Data Link packet header:
+        - Bits 0..2 (3 bits) : Message Session ID (1..7)
+        - Bit 3     (1 bit)  : Delivery Mode (1 = Live Stream, 0 = Full at End)
+        - Bit 4     (1 bit)  : Last Packet Flag (1 = Final frame, 0 = More follow)
+        - Bit 5     (1 bit)  : Payload Type (1 = 16x16 RLE Fax Image, 0 = UTF-8 Text)
+        - Bits 6..11(6 bits) : Sequence Number (0..63)
+        """
         msg_id_bits = f"{msg_id & 0x07:03b}"
         mode_bit = '1' if stream_mode else '0'
         last_bit = '1' if is_last else '0'
-        seq_bits = f"{seq_num & 0x7F:07b}"
-        return f"{msg_id_bits}{mode_bit}{last_bit}{seq_bits}"
+        fax_bit = '1' if is_fax else '0'
+        seq_bits = f"{seq_num & 0x3F:06b}"
+        return f"{msg_id_bits}{mode_bit}{last_bit}{fax_bit}{seq_bits}"
 
     @staticmethod
     def unpack_packet_header(payload_bits: str) -> dict:
-        """Extract and validate the 12-bit packet header and remaining word bits."""
+        """Extract and validate the 12-bit packet header and remaining payload bits."""
         if len(payload_bits) < 20:
             return {"valid": False}
         header = payload_bits[:12]
         content_bits = payload_bits[12:]
         msg_id = int(header[0:3], 2)
-        seq_num = int(header[5:12], 2)
+        seq_num = int(header[6:12], 2)
 
-        # Reject random noise headers with out-of-range IDs or sequence numbers
-        if msg_id == 0 or seq_num > 64:
+        if msg_id == 0 or seq_num > 60:
             return {"valid": False}
 
         return {
@@ -171,6 +179,7 @@ class ChannelCoder:
             "msg_id": msg_id,
             "stream_mode": header[3] == '1',
             "is_last": header[4] == '1',
+            "is_fax": header[5] == '1',
             "seq_num": seq_num,
             "content_bits": content_bits
         }
@@ -247,8 +256,7 @@ class ChannelCoder:
     ) -> list[dict]:
         """
         Scan a bit stream and extract HDLC frames between 01111110 flags.
-        When strict_crc=True (default), frames failing CRC-8 are strictly discarded
-        so ambient noise never produces garbage text.
+        Strictly enforces CRC-8 when strict_crc=True.
         """
         flag = cls.HDLC_FLAG
         flag_len = len(flag)
@@ -316,7 +324,7 @@ class ChannelCoder:
 
     @classmethod
     def parse_frame(cls, received_frame_bits: str, use_hamming: bool = True) -> dict:
-        """Parse the first HDLC frame from a bit stream (allows inspection in Signal Lab)."""
+        """Parse the first HDLC frame from a bit stream."""
         frames = cls.parse_all_frames(received_frame_bits, use_hamming=use_hamming, strict_crc=False)
         if frames:
             return frames[0]

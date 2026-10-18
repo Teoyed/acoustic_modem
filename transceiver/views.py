@@ -2,7 +2,6 @@
 import base64
 import io
 import json
-import math
 import random
 import wave
 import numpy as np
@@ -49,56 +48,99 @@ def dashboard_view(request):
 @csrf_exempt
 def transmit_and_analyze_api(request):
     """
-    High-Speed Transmission Pipeline:
-    Supports 4-FSK (M=4, 2 bits/symbol) and Shared-Flag HDLC framing.
+    High-Speed Transmission Pipeline supporting both UTF-8 Text and
+    16x16 Binary Pixel Fax with RLE Compression, Hamming(7,4), CRC-8, and 4-FSK.
     """
     if request.method != 'POST':
         return JsonResponse({'error': 'POST request required.'}, status=405)
 
     try:
         data = json.loads(request.body.decode('utf-8'))
+        payload_type = data.get('payload_type', 'text')  # 'text' or 'fax'
         text = data.get('text', '').strip() or 'Hello UoM!'
+        fax_matrix = data.get('fax_matrix', None)
         baud_rate = int(data.get('baud_rate', 65))
         levels_m = int(data.get('levels_m', 4))
         ultrasonic = bool(data.get('ultrasonic', False))
-        delivery_mode = data.get('delivery_mode', 'stream')  # 'stream' or 'full'
+        delivery_mode = data.get('delivery_mode', 'stream')
         use_rle = bool(data.get('use_rle', False))
         use_hamming = bool(data.get('use_hamming', True))
         noise_std = float(data.get('noise_std', 0.05))
         error_mode = data.get('error_mode', 'multiple')
 
         stream_mode_flag = (delivery_mode == 'stream')
+        is_fax = (payload_type == 'fax')
         msg_id = random.randint(1, 7)
 
-        # In 'full' mode, group into larger chunks (up to 4 words per frame) to slash overhead!
-        raw_words = [w for w in text.split(' ') if w] or [text]
-        if stream_mode_flag:
-            chunks = raw_words
-        else:
-            chunks = [' '.join(raw_words[i:i+4]) for i in range(0, len(raw_words), 4)]
-
         payloads = []
+        packet_items = []
         total_raw_bits = 0
         total_rle_bits = 0
+        rle_saving_percent = 0.0
 
-        for idx, chunk_text in enumerate(chunks):
-            is_last = (idx == len(chunks) - 1)
-            c_bits = SourceCoder.text_to_bits(chunk_text)
-            rle_stats = SourceCoder.rle_encode(c_bits)
-            encoded_bits = rle_stats['encoded_bits'] if use_rle else c_bits
+        if is_fax:
+            # 16x16 Binary Pixel Fax Mode (256 bits compressed via RLE)
+            if isinstance(fax_matrix, list) and len(fax_matrix) == 16:
+                raw_fax_bits = SourceCoder.binary_matrix_to_bits(fax_matrix)
+            else:
+                raw_fax_bits = data.get('fax_bits', '0' * 256)[:256].ljust(256, '0')
 
-            total_raw_bits += len(c_bits)
-            total_rle_bits += rle_stats['compressed_len']
+            rle_stats = SourceCoder.rle_encode(raw_fax_bits)
+            compressed_fax_bits = rle_stats['encoded_bits']
+            total_raw_bits = len(raw_fax_bits)
+            total_rle_bits = rle_stats['compressed_len']
+            rle_saving_percent = rle_stats['saving_percent']
 
-            header_bits = ChannelCoder.pack_packet_header(
-                msg_id=msg_id,
-                seq_num=idx,
-                is_last=is_last,
-                stream_mode=stream_mode_flag
-            )
-            payloads.append(header_bits + encoded_bits)
+            # Slice RLE stream into compact 32-bit (4-run) packets for fast scanline streaming
+            chunk_bit_size = 32 if stream_mode_flag else 64
+            rle_chunks = [
+                compressed_fax_bits[i:i + chunk_bit_size]
+                for i in range(0, len(compressed_fax_bits), chunk_bit_size)
+            ] or [compressed_fax_bits]
 
-        # Build back-to-back Shared-Flag HDLC stream (eliminates redundant flags & preambles)
+            for idx, rle_chunk in enumerate(rle_chunks):
+                is_last = (idx == len(rle_chunks) - 1)
+                header_bits = ChannelCoder.pack_packet_header(
+                    msg_id=msg_id,
+                    seq_num=idx,
+                    is_last=is_last,
+                    stream_mode=stream_mode_flag,
+                    is_fax=True
+                )
+                payloads.append(header_bits + rle_chunk)
+                packet_items.append(rle_chunk)
+
+            log_label = f"[16x16 Pixel Fax | RLE {total_rle_bits}b ({rle_saving_percent}% saved)]"
+        else:
+            # Standard UTF-8 Text Mode
+            raw_words = [w for w in text.split(' ') if w] or [text]
+            chunks = raw_words if stream_mode_flag else [
+                ' '.join(raw_words[i:i + 4]) for i in range(0, len(raw_words), 4)
+            ]
+
+            for idx, chunk_text in enumerate(chunks):
+                is_last = (idx == len(chunks) - 1)
+                c_bits = SourceCoder.text_to_bits(chunk_text)
+                rle_stats = SourceCoder.rle_encode(c_bits)
+                encoded_bits = rle_stats['encoded_bits'] if use_rle else c_bits
+
+                total_raw_bits += len(c_bits)
+                total_rle_bits += rle_stats['compressed_len']
+
+                header_bits = ChannelCoder.pack_packet_header(
+                    msg_id=msg_id,
+                    seq_num=idx,
+                    is_last=is_last,
+                    stream_mode=stream_mode_flag,
+                    is_fax=False
+                )
+                payloads.append(header_bits + encoded_bits)
+                packet_items.append(chunk_text)
+
+            if total_raw_bits > 0:
+                rle_saving_percent = round((1.0 - (total_rle_bits / total_raw_bits)) * 100, 1)
+            log_label = text
+
         stream_info = ChannelCoder.build_shared_flag_stream(payloads, use_hamming=use_hamming)
         stream_bits = stream_info['stream_bits']
 
@@ -114,14 +156,16 @@ def transmit_and_analyze_api(request):
 
         effective_bps = modem.bit_rate_bps
         packet_schedule = []
-        for idx, chunk_text in enumerate(chunks):
+        for idx, item_val in enumerate(packet_items):
             emit_sec = round(stream_info['cumulative_bits'][idx] / effective_bps, 3)
             packet_schedule.append({
                 'msg_id': msg_id,
                 'seq_num': idx,
-                'is_last': (idx == len(chunks) - 1),
+                'is_last': (idx == len(packet_items) - 1),
                 'stream_mode': stream_mode_flag,
-                'word': chunk_text,
+                'is_fax': is_fax,
+                'word': item_val if not is_fax else '',
+                'rle_chunk': item_val if is_fax else '',
                 'emit_time_sec': emit_sec
             })
 
@@ -155,10 +199,10 @@ def transmit_and_analyze_api(request):
         total_stream_bits = stream_info['total_stream_len']
 
         log_entry = TransmissionLog.objects.create(
-            input_text=text,
+            input_text=log_label,
             carrier_mode='ultrasonic' if ultrasonic else 'audible',
             baud_rate=effective_bps,
-            use_rle=use_rle,
+            use_rle=True if is_fax else use_rle,
             use_hamming=use_hamming,
             raw_bits_len=total_raw_bits,
             total_frame_bits=total_stream_bits,
@@ -169,7 +213,7 @@ def transmit_and_analyze_api(request):
             nyquist_bps=metrics['nyquist_max_bps'],
             shannon_bps=metrics['shannon_capacity_bps'],
             crc_passed=crc_passed,
-            recovered_text=text
+            recovered_text=log_label
         )
 
         waveform_preview = _extract_fsk_transition_preview(rx_first_wave, modem.samples_per_symbol)
@@ -178,7 +222,8 @@ def transmit_and_analyze_api(request):
             'status': 'ok',
             'log_id': log_entry.id,
             'msg_id': msg_id,
-            'packet_count': len(chunks),
+            'is_fax': is_fax,
+            'packet_count': len(packet_items),
             'packet_schedule': packet_schedule,
             'delivery_mode': delivery_mode,
             'audio_wav_base64': wav_base64,
@@ -186,6 +231,7 @@ def transmit_and_analyze_api(request):
             'framing': {
                 'raw_bits_len': total_raw_bits,
                 'rle_compressed_len': total_rle_bits,
+                'rle_saving_percent': rle_saving_percent,
                 'crc_bits': stream_info['first_crc'],
                 'total_frame_len': total_stream_bits,
                 'tx_frame_bits': first_tx_bits[:160],
@@ -198,7 +244,7 @@ def transmit_and_analyze_api(request):
                 'physical_bit_errors': bit_mismatches,
                 'ber': ber,
                 'corrected_count': corrected_count,
-                'recovered_text': text,
+                'recovered_text': log_label,
             },
             'channel_metrics': metrics,
             'charts': {
@@ -213,8 +259,8 @@ def transmit_and_analyze_api(request):
 @csrf_exempt
 def decode_wav_api(request):
     """
-    Demodulate a live microphone snapshot or uploaded WAV file using
-    M-FSK (2-FSK or 4-FSK) and shared-flag HDLC frame extraction.
+    Demodulate a live microphone snapshot or uploaded WAV file and reconstruct
+    either UTF-8 Text words or a 16x16 RLE-compressed Pixel Fax image.
     """
     if request.method != 'POST' or 'audio_file' not in request.FILES:
         return JsonResponse({'error': 'WAV audio_file required.'}, status=400)
@@ -264,8 +310,25 @@ def decode_wav_api(request):
             last_positions = f.get('corrected_positions', [])
 
             header_info = ChannelCoder.unpack_packet_header(f['payload_bits'])
-            if header_info.get('valid'):
-                c_bits = header_info['content_bits']
+            if not header_info.get('valid'):
+                continue
+
+            c_bits = header_info['content_bits']
+            if header_info['is_fax']:
+                valid_rle_len = (len(c_bits) // 8) * 8
+                rle_chunk = c_bits[:valid_rle_len]
+                if not rle_chunk:
+                    continue
+                packets.append({
+                    'msg_id': header_info['msg_id'],
+                    'seq_num': header_info['seq_num'],
+                    'is_last': header_info['is_last'],
+                    'stream_mode': header_info['stream_mode'],
+                    'is_fax': True,
+                    'word': '',
+                    'rle_chunk': rle_chunk
+                })
+            else:
                 raw_word_bits = SourceCoder.rle_decode(c_bits) if use_rle else c_bits
                 word_text = SourceCoder.bits_to_text(raw_word_bits)
                 if not SourceCoder.is_clean_text(word_text):
@@ -275,26 +338,29 @@ def decode_wav_api(request):
                     'seq_num': header_info['seq_num'],
                     'is_last': header_info['is_last'],
                     'stream_mode': header_info['stream_mode'],
-                    'word': word_text
+                    'is_fax': False,
+                    'word': word_text,
+                    'rle_chunk': ''
                 })
 
         if not packets:
             return JsonResponse({'status': 'error', 'error': 'No valid packet headers found.'})
 
         latest_msg_id = packets[-1]['msg_id']
-        ordered_map = {}
-        stream_mode = True
-        is_complete = False
+        session_packets = [p for p in packets if p['msg_id'] == latest_msg_id]
+        is_fax_session = session_packets[-1]['is_fax']
+        stream_mode = session_packets[-1]['stream_mode']
+        is_complete = any(p['is_last'] for p in session_packets)
 
-        for p in packets:
-            if p['msg_id'] == latest_msg_id:
-                ordered_map[p['seq_num']] = p['word']
-                stream_mode = p['stream_mode']
-                if p['is_last']:
-                    is_complete = True
-
-        assembled_words = [ordered_map[k] for k in sorted(ordered_map.keys())]
-        assembled_text = ' '.join(assembled_words)
+        if is_fax_session:
+            ordered_rle = {p['seq_num']: p['rle_chunk'] for p in session_packets}
+            combined_rle = ''.join(ordered_rle[k] for k in sorted(ordered_rle.keys()))
+            decoded_fax_bits = SourceCoder.rle_decode(combined_rle)
+            assembled_text = f"[16x16 Fax Image: {len(decoded_fax_bits)}/256 pixels decoded]"
+        else:
+            ordered_words = {p['seq_num']: p['word'] for p in session_packets}
+            assembled_text = ' '.join(ordered_words[k] for k in sorted(ordered_words.keys()))
+            decoded_fax_bits = ''
 
         last_burst = stream_res['last_burst_wave']
         if len(last_burst) < modem.samples_per_symbol * 2:
@@ -304,15 +370,17 @@ def decode_wav_api(request):
         return JsonResponse({
             'status': 'ok',
             'msg_id': latest_msg_id,
+            'is_fax': is_fax_session,
+            'fax_bits': decoded_fax_bits[:256],
             'stream_mode': stream_mode,
             'is_complete': is_complete,
-            'packets': [p for p in packets if p['msg_id'] == latest_msg_id],
+            'packets': session_packets,
             'recovered_text': assembled_text,
             'crc_passed': True,
             'corrected_errors_count': total_repaired,
             'metrics': metrics,
             'framing': {
-                'raw_bits_len': len(assembled_text.encode('utf-8')) * 8,
+                'raw_bits_len': 256 if is_fax_session else len(assembled_text.encode('utf-8')) * 8,
                 'crc_bits': last_crc,
                 'total_frame_len': len(last_matched_bits),
                 'tx_frame_bits': last_matched_bits,

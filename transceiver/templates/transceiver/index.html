@@ -65,6 +65,25 @@
         .link { background: none; border: 0; padding: 0; color: var(--blue); font: 600 13px var(--body); cursor: pointer; white-space: nowrap; }
         audio { width: 100%; height: 36px; }
 
+        /* Mode Switch & 16x16 Pixel Fax Grid */
+        .mode-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; background: var(--bg); border-radius: 99px; }
+        .mode-btn { border: 0; padding: 8px 14px; border-radius: 99px; background: transparent; color: var(--muted); font: 600 13px var(--body); cursor: pointer; transition: background .15s, color .15s, box-shadow .15s; }
+        .mode-btn.active { background: var(--card); color: var(--ink); box-shadow: 0 2px 8px rgba(15, 21, 48, .08); }
+        .fax-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+        .fax-head .label { margin-bottom: 0; }
+        .fax-tools { display: flex; gap: 6px; }
+        .chip-btn { border: 0; padding: 5px 11px; border-radius: 99px; background: var(--bg); color: var(--ink); font: 600 12px var(--body); cursor: pointer; transition: background .15s, color .15s; }
+        .chip-btn:hover { background: var(--blue-soft); color: var(--blue); }
+        .chip-btn.danger { background: #ffe1da; color: #d6381a; }
+        .chip-btn.danger:hover { background: var(--orange); color: #fff; }
+        .fax-stage { padding: 16px; background: var(--bg); border-radius: 20px; display: flex; flex-direction: column; align-items: center; gap: 10px; user-select: none; }
+        .fax-grid { display: grid; grid-template-columns: repeat(16, 1fr); gap: 2px; width: 248px; height: 248px; padding: 6px; background: var(--line); border-radius: 14px; touch-action: none; }
+        .fax-cell, .rx-fax-cell { background: var(--card); border-radius: 2px; transition: background-color .08s; }
+        .fax-cell { cursor: pointer; }
+        .fax-cell.active, .rx-fax-cell.active { background: var(--ink); }
+        .rx-fax-cell.unscanned { background: #cfd6e8; opacity: .55; }
+        .fax-stat { color: var(--green); font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+
         /* Listen */
         .listen { display: flex; flex-direction: column; align-items: center; gap: 18px; text-align: center; }
         .listen h2 { margin: 0; font: 800 24px var(--display); letter-spacing: -0.02em; }
@@ -150,9 +169,38 @@
 
         <!-- TAB 1: SEND -->
         <section id="tab-send" class="card">
-            <div>
+
+            <!-- Mode Switch: Text vs Fax Mode (16x16 Grid) -->
+            <div class="mode-switch" role="tablist" aria-label="Payload Mode">
+                <button id="modeBtn-text" type="button" onclick="setPayloadMode('text')" class="mode-btn active">
+                    Text message
+                </button>
+                <button id="modeBtn-fax" type="button" onclick="setPayloadMode('fax')" class="mode-btn">
+                    Fax Mode (16&times;16 Grid)
+                </button>
+            </div>
+
+            <!-- Panel A: Text Input -->
+            <div id="panel-text-input">
                 <label class="label" for="inputText">Your message</label>
                 <textarea id="inputText" rows="3" placeholder="Type something to send through the air"></textarea>
+            </div>
+
+            <!-- Panel B: 16x16 Pixel Fax Canvas -->
+            <div id="panel-fax-input" class="hidden">
+                <div class="fax-head">
+                    <span class="label">Draw 16&times;16 pixel fax</span>
+                    <div class="fax-tools">
+                        <button type="button" onclick="loadFaxPreset('smile')" class="chip-btn">Smile</button>
+                        <button type="button" onclick="loadFaxPreset('heart')" class="chip-btn">Heart</button>
+                        <button type="button" onclick="loadFaxPreset('hi')" class="chip-btn">HI</button>
+                        <button type="button" onclick="clearFaxCanvas()" class="chip-btn danger">Clear</button>
+                    </div>
+                </div>
+                <div class="fax-stage">
+                    <div id="txFaxGrid" class="fax-grid"></div>
+                    <div id="rleLiveStats" class="fax-stat">Raw: 256 bits &rarr; RLE: 24 bits (90.6% saved)</div>
+                </div>
             </div>
 
             <div class="opts">
@@ -209,10 +257,17 @@
 
             <div class="bubble">
                 <div class="bubble-head">
-                    <span>Received message</span>
+                    <span id="rxOutputHeader">Received message</span>
                     <span id="otaCrcBadge" class="badge">Idle</span>
                 </div>
                 <div id="otaDecodedText">—</div>
+
+                <!-- 16x16 Fax Receiver Grid (Automatically shown when Fax packets arrive) -->
+                <div id="rxFaxWrapper" class="hidden fax-stage" style="margin-top: 4px;">
+                    <div id="rxFaxGrid" class="fax-grid"></div>
+                    <div id="rxFaxProgress" class="fax-stat">0 / 256 pixels decoded</div>
+                </div>
+
                 <div id="otaFecNote"></div>
             </div>
 
@@ -316,6 +371,11 @@
     </nav>
 
     <script>
+        let payloadMode = 'text'; // 'text' or 'fax'
+        let txFaxPixels = new Array(256).fill(0);
+        let isDrawingFax = false;
+        let drawPaintValue = 1;
+
         let waveChart = null;
         let audioCtx = null;
         let mediaStream = null;
@@ -328,6 +388,7 @@
 
         let activeMsgId = null;
         let receivedWordMap = {};
+        let receivedRleMap = {};
         let currentMsgComplete = false;
         let totalExpectedWords = 0;
 
@@ -352,6 +413,191 @@
             }
         };
 
+        // ========================================================
+        // 16x16 PIXEL FAX CANVAS & RLE HELPERS
+        // ========================================================
+        function setPayloadMode(mode) {
+            payloadMode = mode;
+            const btnText = document.getElementById('modeBtn-text');
+            const btnFax = document.getElementById('modeBtn-fax');
+            const panelText = document.getElementById('panel-text-input');
+            const panelFax = document.getElementById('panel-fax-input');
+            const txBtn = document.getElementById('transmitBtn');
+
+            if (mode === 'fax') {
+                btnFax.className = 'mode-btn active';
+                btnText.className = 'mode-btn';
+                panelText.classList.add('hidden');
+                panelFax.classList.remove('hidden');
+                txBtn.innerText = 'Send 16×16 Fax via sound';
+                updateLiveRlePreview();
+            } else {
+                btnText.className = 'mode-btn active';
+                btnFax.className = 'mode-btn';
+                panelFax.classList.add('hidden');
+                panelText.classList.remove('hidden');
+                txBtn.innerText = 'Send via sound';
+            }
+        }
+
+        function initFaxGrids() {
+            const txGrid = document.getElementById('txFaxGrid');
+            const rxGrid = document.getElementById('rxFaxGrid');
+            txGrid.innerHTML = '';
+            rxGrid.innerHTML = '';
+
+            for (let i = 0; i < 256; i++) {
+                const cell = document.createElement('div');
+                cell.className = 'fax-cell';
+                cell.dataset.idx = i;
+
+                cell.addEventListener('pointerdown', (e) => {
+                    e.preventDefault();
+                    isDrawingFax = true;
+                    drawPaintValue = txFaxPixels[i] === 1 ? 0 : 1;
+                    setFaxPixel(i, drawPaintValue);
+                });
+                cell.addEventListener('pointerenter', () => {
+                    if (isDrawingFax) {
+                        setFaxPixel(i, drawPaintValue);
+                    }
+                });
+                txGrid.appendChild(cell);
+
+                const rxCell = document.createElement('div');
+                rxCell.className = 'rx-fax-cell unscanned';
+                rxCell.id = 'rxFaxCell-' + i;
+                rxGrid.appendChild(rxCell);
+            }
+
+            window.addEventListener('pointerup', () => { isDrawingFax = false; });
+            loadFaxPreset('smile');
+        }
+
+        function setFaxPixel(idx, val) {
+            txFaxPixels[idx] = val;
+            const cell = document.getElementById('txFaxGrid').children[idx];
+            if (val === 1) {
+                cell.classList.add('active');
+            } else {
+                cell.classList.remove('active');
+            }
+            updateLiveRlePreview();
+        }
+
+        function clearFaxCanvas() {
+            txFaxPixels.fill(0);
+            const cells = document.getElementById('txFaxGrid').children;
+            for (let i = 0; i < 256; i++) {
+                cells[i].classList.remove('active');
+            }
+            updateLiveRlePreview();
+        }
+
+        function loadFaxPreset(name) {
+            clearFaxCanvas();
+            const coords = [];
+            if (name === 'smile') {
+                coords.push([4, 5], [4, 10], [5, 5], [5, 10]);
+                coords.push([10, 4], [10, 11], [11, 5], [11, 10], [12, 6], [12, 7], [12, 8], [12, 9]);
+            } else if (name === 'heart') {
+                const rows = [
+                    "0000000000000000",
+                    "0000000000000000",
+                    "0001110000111000",
+                    "0011111001111100",
+                    "0111111111111110",
+                    "0111111111111110",
+                    "0111111111111110",
+                    "0011111111111100",
+                    "0001111111111000",
+                    "0000111111110000",
+                    "0000011111100000",
+                    "0000001111000000",
+                    "0000000110000000",
+                    "0000000000000000",
+                    "0000000000000000",
+                    "0000000000000000"
+                ];
+                rows.forEach((r, rIdx) => {
+                    for (let cIdx = 0; cIdx < 16; cIdx++) {
+                        if (r[cIdx] === '1') coords.push([rIdx, cIdx]);
+                    }
+                });
+            } else if (name === 'hi') {
+                for (let r = 4; r <= 11; r++) {
+                    coords.push([r, 3], [r, 4], [r, 8], [r, 9], [r, 12], [r, 13]);
+                }
+                coords.push([7, 5], [7, 6], [7, 7], [8, 5], [8, 6], [8, 7]);
+            }
+
+            coords.forEach(([r, c]) => {
+                setFaxPixel(r * 16 + c, 1);
+            });
+            updateLiveRlePreview();
+        }
+
+        function computeClientRleBits(bitStr) {
+            if (!bitStr) return "";
+            let chunks = [];
+            let cur = bitStr[0];
+            let count = 1;
+            for (let i = 1; i < bitStr.length; i++) {
+                if (bitStr[i] === cur && count < 127) {
+                    count++;
+                } else {
+                    chunks.push(cur + count.toString(2).padStart(7, '0'));
+                    cur = bitStr[i];
+                    count = 1;
+                }
+            }
+            chunks.push(cur + count.toString(2).padStart(7, '0'));
+            return chunks.join('');
+        }
+
+        function decodeClientRleBits(rleBits) {
+            let out = [];
+            let validLen = Math.floor(rleBits.length / 8) * 8;
+            for (let i = 0; i < validLen; i += 8) {
+                let bitVal = rleBits[i];
+                let count = parseInt(rleBits.slice(i + 1, i + 8), 2);
+                out.push(bitVal.repeat(count));
+            }
+            return out.join('');
+        }
+
+        function updateLiveRlePreview() {
+            const rawBits = txFaxPixels.join('');
+            const rleBits = computeClientRleBits(rawBits);
+            const saved = (((256 - rleBits.length) / 256) * 100).toFixed(1);
+            document.getElementById('rleLiveStats').innerText =
+                `Raw: 256 bits → RLE: ${rleBits.length} bits (${saved}% saved)`;
+        }
+
+        function renderReceiverFaxGrid(decodedBits, isComplete) {
+            document.getElementById('otaDecodedText').classList.add('hidden');
+            document.getElementById('rxFaxWrapper').classList.remove('hidden');
+            document.getElementById('rxOutputHeader').innerText = 'Received 16×16 Pixel Fax';
+
+            const shownPixels = Math.min(256, decodedBits.length);
+            for (let i = 0; i < 256; i++) {
+                const cell = document.getElementById('rxFaxCell-' + i);
+                if (i < shownPixels) {
+                    cell.classList.remove('unscanned');
+                    if (decodedBits[i] === '1') {
+                        cell.classList.add('active');
+                    } else {
+                        cell.classList.remove('active');
+                    }
+                } else if (!isComplete) {
+                    cell.classList.remove('active');
+                    cell.classList.add('unscanned');
+                }
+            }
+            document.getElementById('rxFaxProgress').innerText =
+                `${shownPixels} / 256 pixels decoded via RLE`;
+        }
+
         function updateHeaderBadge() {
             const m = document.getElementById('levelsM').value;
             const baud = parseInt(document.getElementById('baudRate').value);
@@ -372,6 +618,7 @@
 
             activeMsgId = txData.msg_id;
             receivedWordMap = {};
+            receivedRleMap = {};
             currentMsgComplete = false;
             totalExpectedWords = schedule.length;
 
@@ -395,42 +642,73 @@
             if (activeMsgId !== pkt.msg_id) {
                 activeMsgId = pkt.msg_id;
                 receivedWordMap = {};
+                receivedRleMap = {};
                 currentMsgComplete = false;
             }
 
-            receivedWordMap[pkt.seq_num] = pkt.word;
             if (pkt.is_last) {
                 currentMsgComplete = true;
             }
 
-            const sortedSeqs = Object.keys(receivedWordMap).map(Number).sort((a, b) => a - b);
-            const fullSentenceSoFar = sortedSeqs.map(k => receivedWordMap[k]).join(' ');
-            const countLabel = totalExpectedWords > 0
-                ? `${sortedSeqs.length}/${totalExpectedWords}`
-                : `${sortedSeqs.length}`;
+            if (pkt.is_fax) {
+                receivedRleMap[pkt.seq_num] = pkt.rle_chunk;
+                const sortedSeqs = Object.keys(receivedRleMap).map(Number).sort((a, b) => a - b);
+                const accumulatedRle = sortedSeqs.map(k => receivedRleMap[k]).join('');
+                const decodedPixels = decodeClientRleBits(accumulatedRle);
+                const countLabel = totalExpectedWords > 0
+                    ? `${sortedSeqs.length}/${totalExpectedWords}`
+                    : `${sortedSeqs.length}`;
 
-            if (pkt.stream_mode) {
-                document.getElementById('otaDecodedText').innerText =
-                    currentMsgComplete ? fullSentenceSoFar : (fullSentenceSoFar + ' ...');
-                document.getElementById('otaStatusText').innerText = currentMsgComplete
-                    ? `Message complete (${countLabel} packets decoded live at ${bitRateBps || 130} bps)!`
-                    : `Streaming live word-by-word (${countLabel} decoded)...`;
-                badge.innerText = currentMsgComplete ? 'Stream Complete (CRC-8 OK)' : `Packet ${countLabel} Live`;
-                badge.className = 'badge badge-ok';
-            } else {
-                if (currentMsgComplete) {
-                    document.getElementById('otaDecodedText').innerText = fullSentenceSoFar;
-                    document.getElementById('otaStatusText').innerText =
-                        `Full message received (${countLabel} blocks reassembled)!`;
-                    badge.innerText = 'Full Message Verified';
+                if (pkt.stream_mode || currentMsgComplete) {
+                    renderReceiverFaxGrid(decodedPixels, currentMsgComplete);
+                    document.getElementById('otaStatusText').innerText = currentMsgComplete
+                        ? `16×16 Pixel Fax complete (${countLabel} RLE packets decoded)!`
+                        : `Scanning live Fax lines (${decodedPixels.length}/256 pixels)...`;
+                    badge.innerText = currentMsgComplete ? 'Fax Complete (CRC-8 OK)' : `Fax Scan ${countLabel}`;
                     badge.className = 'badge badge-ok';
                 } else {
+                    document.getElementById('rxFaxWrapper').classList.add('hidden');
+                    document.getElementById('otaDecodedText').classList.remove('hidden');
                     document.getElementById('otaDecodedText').innerText =
-                        `[Buffering high-speed packets: ${countLabel} received...]`;
-                    document.getElementById('otaStatusText').innerText =
-                        'Sender selected "Full Message at End" — buffering until final HDLC flag...';
-                    badge.innerText = `Buffering ${countLabel}`;
+                        `[Buffering 16×16 Fax RLE packets: ${countLabel} received...]`;
+                    badge.innerText = `Buffering Fax ${countLabel}`;
                     badge.className = 'badge badge-warn';
+                }
+            } else {
+                document.getElementById('rxFaxWrapper').classList.add('hidden');
+                document.getElementById('otaDecodedText').classList.remove('hidden');
+                document.getElementById('rxOutputHeader').innerText = 'Received message';
+
+                receivedWordMap[pkt.seq_num] = pkt.word;
+                const sortedSeqs = Object.keys(receivedWordMap).map(Number).sort((a, b) => a - b);
+                const fullSentenceSoFar = sortedSeqs.map(k => receivedWordMap[k]).join(' ');
+                const countLabel = totalExpectedWords > 0
+                    ? `${sortedSeqs.length}/${totalExpectedWords}`
+                    : `${sortedSeqs.length}`;
+
+                if (pkt.stream_mode) {
+                    document.getElementById('otaDecodedText').innerText =
+                        currentMsgComplete ? fullSentenceSoFar : (fullSentenceSoFar + ' ...');
+                    document.getElementById('otaStatusText').innerText = currentMsgComplete
+                        ? `Message complete (${countLabel} packets decoded live at ${bitRateBps || 130} bps)!`
+                        : `Streaming live word-by-word (${countLabel} decoded)...`;
+                    badge.innerText = currentMsgComplete ? 'Stream Complete (CRC-8 OK)' : `Packet ${countLabel} Live`;
+                    badge.className = 'badge badge-ok';
+                } else {
+                    if (currentMsgComplete) {
+                        document.getElementById('otaDecodedText').innerText = fullSentenceSoFar;
+                        document.getElementById('otaStatusText').innerText =
+                            `Full message received (${countLabel} blocks reassembled)!`;
+                        badge.innerText = 'Full Message Verified';
+                        badge.className = 'badge badge-ok';
+                    } else {
+                        document.getElementById('otaDecodedText').innerText =
+                            `[Buffering high-speed packets: ${countLabel} received...]`;
+                        document.getElementById('otaStatusText').innerText =
+                            'Sender selected "Full message" — buffering until final HDLC flag...';
+                        badge.innerText = `Buffering ${countLabel}`;
+                        badge.className = 'badge badge-warn';
+                    }
                 }
             }
 
@@ -516,8 +794,11 @@
             document.getElementById('metricCrc').className = 'metric-value ' + (f.crc_passed ? 'ok' : 'bad');
             document.getElementById('metricFrameLen').innerText = `Total Stream: ${fr.total_frame_len} bits`;
 
+            const rleNote = fr.rle_compressed_len
+                ? ` | RLE: ${fr.rle_compressed_len}b (${fr.rle_saving_percent || 0}% saved)`
+                : '';
             document.getElementById('frameSummaryText').innerText =
-                `Data: ${fr.raw_bits_len} bits | CRC-8: ${fr.crc_bits} | Decoded: "${f.recovered_text}"`;
+                `Data: ${fr.raw_bits_len} bits${rleNote} | CRC-8: ${fr.crc_bits} | Decoded: "${f.recovered_text}"`;
 
             renderBitInspector(fr.tx_frame_bits, fr.rx_frame_bits, fr.flipped_indices);
 
@@ -530,20 +811,9 @@
         }
 
         async function runTransmission() {
-            const textInput = document.getElementById('inputText');
-            const message = textInput.value.trim();
-            if (!message) {
-                textInput.focus();
-                alert('Please type a message first!');
-                return;
-            }
-
             const btn = document.getElementById('transmitBtn');
-            btn.disabled = true;
-            btn.innerText = 'Modulating High-Speed Audio...';
-
             const payload = {
-                text: message,
+                payload_type: payloadMode,
                 levels_m: parseInt(document.getElementById('levelsM').value),
                 delivery_mode: document.getElementById('deliveryMode').value,
                 ultrasonic: document.getElementById('carrierMode').value === 'ultrasonic',
@@ -553,6 +823,22 @@
                 use_hamming: document.getElementById('useHamming').checked,
                 use_rle: document.getElementById('useRle').checked
             };
+
+            if (payloadMode === 'fax') {
+                payload.fax_bits = txFaxPixels.join('');
+            } else {
+                const textInput = document.getElementById('inputText');
+                const message = textInput.value.trim();
+                if (!message) {
+                    textInput.focus();
+                    alert('Please type a message first!');
+                    return;
+                }
+                payload.text = message;
+            }
+
+            btn.disabled = true;
+            btn.innerText = 'Modulating High-Speed Audio...';
 
             try {
                 const res = await fetch('/api/transmit/', {
@@ -585,7 +871,7 @@
                 alert('Transmission error: ' + err);
             } finally {
                 btn.disabled = false;
-                btn.innerText = 'Send via Sound';
+                btn.innerText = payloadMode === 'fax' ? 'Send 16×16 Fax via sound' : 'Send via sound';
             }
         }
 
@@ -644,6 +930,7 @@
                 scriptProcessor = audioCtx.createScriptProcessor(4096, 1, 1);
                 recordedBuffers = [];
                 receivedWordMap = {};
+                receivedRleMap = {};
                 activeMsgId = null;
                 currentMsgComplete = false;
                 isRecording = true;
@@ -662,7 +949,7 @@
 
                 btn.classList.add('is-listening');
                 label.innerText = 'Stop';
-                statusText.innerText = 'Listening live for M-FSK sound waves...';
+                statusText.innerText = 'Listening live for M-FSK Text or 16×16 Fax waves...';
                 badge.innerText = 'Listening Live...';
                 badge.className = 'badge badge-live';
 
@@ -701,11 +988,6 @@
             if (recordedBuffers.length > 5 && audioCtx) {
                 const wavBlob = encodeWAV(recordedBuffers, audioCtx.sampleRate);
                 await sendWavToBackend(wavBlob, true, true);
-            }
-
-            const keys = Object.keys(receivedWordMap).map(Number).sort((a, b) => a - b);
-            if (keys.length > 0) {
-                document.getElementById('otaDecodedText').innerText = keys.map(k => receivedWordMap[k]).join(' ');
             }
 
             if (audioCtx) {
@@ -811,7 +1093,9 @@
                             data.metrics.actual_bit_rate_bps
                         );
                     }
-                    if (forceReveal) {
+                    if (forceReveal && data.is_fax && data.fax_bits) {
+                        renderReceiverFaxGrid(data.fax_bits, true);
+                    } else if (forceReveal && !data.is_fax) {
                         const sortedSeqs = Object.keys(receivedWordMap).map(Number).sort((a, b) => a - b);
                         document.getElementById('otaDecodedText').innerText = sortedSeqs.map(k => receivedWordMap[k]).join(' ');
                     }
@@ -831,6 +1115,7 @@
 
         window.onload = () => {
             initChart();
+            initFaxGrids();
             updateHeaderBadge();
         };
     </script>
@@ -853,7 +1138,9 @@
             let playing = false, listening = false;
             const sync = () => setLive(playing || listening);
             audio.addEventListener('play', () => { playing = true; sync(); });
-            ['pause', 'ended'].forEach(ev => audio.addEventListener(ev, () => { playing = false; sync(); }));
+            ['pause', 'ended'].each ? ['pause', 'ended'].forEach(ev => audio.addEventListener(ev, () => { playing = false; sync(); })) : null;
+            audio.addEventListener('pause', () => { playing = false; sync(); });
+            audio.addEventListener('ended', () => { playing = false; sync(); });
             new MutationObserver(() => { listening = mic.classList.contains('is-listening'); sync(); })
                 .observe(mic, { attributes: true, attributeFilter: ['class'] });
         })();
