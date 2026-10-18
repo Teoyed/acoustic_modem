@@ -48,7 +48,8 @@ def dashboard_view(request):
 @csrf_exempt
 def transmit_and_analyze_api(request):
     """
-    High-Speed Transmission Pipeline with safe Hybrid ARQ Selective Repeat support.
+    End-to-End Transmission Pipeline with Presentation Layer Encryption,
+    RLE Compression, Hamming(7,4) FEC, CRC-8, Shared-Flag HDLC, and M-FSK.
     """
     if request.method != 'POST':
         return JsonResponse({'error': 'POST request required.'}, status=405)
@@ -57,6 +58,7 @@ def transmit_and_analyze_api(request):
         data = json.loads(request.body.decode('utf-8'))
         payload_type = data.get('payload_type', 'text')
         text = data.get('text', '').strip() or 'Hello UoM!'
+        passkey = data.get('passkey', '').strip()
         fax_matrix = data.get('fax_matrix', None)
         baud_rate = int(data.get('baud_rate', 65))
         levels_m = int(data.get('levels_m', 4))
@@ -73,10 +75,12 @@ def transmit_and_analyze_api(request):
 
         stream_mode_flag = (delivery_mode == 'stream')
         is_fax = (payload_type == 'fax')
+        is_encrypted = len(passkey) > 0
         msg_id = int(force_msg_id) if force_msg_id is not None else random.randint(1, 7)
 
         payloads = []
         packet_items = []
+        cipher_bits_items = []
         seq_numbers = []
         is_last_flags = []
         total_raw_bits = 0
@@ -101,7 +105,6 @@ def transmit_and_analyze_api(request):
                 for i in range(0, len(compressed_fax_bits), chunk_bit_size)
             ] or [compressed_fax_bits]
 
-            # Clamp retransmit_seq safely within bounds
             if retransmit_seq is not None:
                 retransmit_seq = max(0, min(int(retransmit_seq), len(all_chunks) - 1))
 
@@ -109,26 +112,30 @@ def transmit_and_analyze_api(request):
                 if retransmit_seq is not None and idx != retransmit_seq:
                     continue
                 is_last = (idx == len(all_chunks) - 1)
+                protected_chunk = SourceCoder.encrypt_bits(rle_chunk, passkey, salt=idx) if is_encrypted else rle_chunk
+
                 header_bits = ChannelCoder.pack_packet_header(
                     msg_id=msg_id,
                     seq_num=idx,
                     is_last=is_last,
                     stream_mode=stream_mode_flag,
-                    is_fax=True
+                    is_fax=True,
+                    is_encrypted=is_encrypted
                 )
-                payloads.append(header_bits + rle_chunk)
+                payloads.append(header_bits + protected_chunk)
                 packet_items.append(rle_chunk)
+                cipher_bits_items.append(protected_chunk)
                 seq_numbers.append(idx)
                 is_last_flags.append(is_last)
 
-            log_label = f"[16x16 Pixel Fax | RLE {total_rle_bits}b ({rle_saving_percent}% saved)]"
+            enc_tag = " [Encrypted]" if is_encrypted else ""
+            log_label = f"[16x16 Fax{enc_tag} | RLE {total_rle_bits}b ({rle_saving_percent}% saved)]"
         else:
             raw_words = [w for w in text.split(' ') if w] or [text]
             all_chunks = raw_words if stream_mode_flag else [
                 ' '.join(raw_words[i:i + 4]) for i in range(0, len(raw_words), 4)
             ]
 
-            # Clamp retransmit_seq safely within bounds so payloads is never empty!
             if retransmit_seq is not None:
                 retransmit_seq = max(0, min(int(retransmit_seq), len(all_chunks) - 1))
 
@@ -143,21 +150,27 @@ def transmit_and_analyze_api(request):
                 total_raw_bits += len(c_bits)
                 total_rle_bits += rle_stats['compressed_len']
 
+                # Presentation Layer Encryption (before HDLC framing)
+                protected_chunk = SourceCoder.encrypt_bits(encoded_bits, passkey, salt=idx) if is_encrypted else encoded_bits
+
                 header_bits = ChannelCoder.pack_packet_header(
                     msg_id=msg_id,
                     seq_num=idx,
                     is_last=is_last,
                     stream_mode=stream_mode_flag,
-                    is_fax=False
+                    is_fax=False,
+                    is_encrypted=is_encrypted
                 )
-                payloads.append(header_bits + encoded_bits)
+                payloads.append(header_bits + protected_chunk)
                 packet_items.append(chunk_text)
+                cipher_bits_items.append(protected_chunk)
                 seq_numbers.append(idx)
                 is_last_flags.append(is_last)
 
             if total_raw_bits > 0:
                 rle_saving_percent = round((1.0 - (total_rle_bits / total_raw_bits)) * 100, 1)
-            log_label = f"[ARQ Retry #{retransmit_seq}] {packet_items[0]}" if retransmit_seq is not None else text
+            enc_prefix = "🔒 " if is_encrypted else ""
+            log_label = f"{enc_prefix}[ARQ Retry #{retransmit_seq}] {packet_items[0]}" if retransmit_seq is not None else f"{enc_prefix}{text}"
 
         corrupt_target_idx = None
         if simulate_arq_nack and retransmit_seq is None and len(payloads) > 0:
@@ -195,12 +208,16 @@ def transmit_and_analyze_api(request):
         for idx, item_val in enumerate(packet_items):
             emit_sec = round(cumulative_bits[idx] / effective_bps, 3)
             is_corrupted_pkt = (corrupt_target_idx is not None and idx == corrupt_target_idx)
+            c_bits_val = cipher_bits_items[idx]
             packet_schedule.append({
                 'msg_id': msg_id,
                 'seq_num': seq_numbers[idx],
                 'is_last': is_last_flags[idx],
                 'stream_mode': stream_mode_flag,
                 'is_fax': is_fax,
+                'is_encrypted': is_encrypted,
+                'cipher_bits': c_bits_val,
+                'cipher_preview': SourceCoder.bits_to_cipher_preview(c_bits_val[8:] if is_encrypted else c_bits_val),
                 'crc_corrupted': is_corrupted_pkt,
                 'word': item_val if not is_fax else '',
                 'rle_chunk': item_val if is_fax else '',
@@ -262,6 +279,7 @@ def transmit_and_analyze_api(request):
             'log_id': log_entry.id,
             'msg_id': msg_id,
             'is_fax': is_fax,
+            'is_encrypted': is_encrypted,
             'is_retransmission': retransmit_seq is not None,
             'retransmitted_seq': retransmit_seq,
             'corrupted_seq': seq_numbers[corrupt_target_idx] if corrupt_target_idx is not None else None,
@@ -301,8 +319,8 @@ def transmit_and_analyze_api(request):
 @csrf_exempt
 def decode_wav_api(request):
     """
-    Demodulate a live microphone snapshot or uploaded WAV file and reconstruct
-    CRC-verified UTF-8 Text or 16x16 Pixel Fax packets.
+    Demodulate a live microphone snapshot or uploaded WAV file, verify CRC-8 & Hamming(7,4),
+    and decrypt the payload using the Receiver's Presentation Layer passkey.
     """
     if request.method != 'POST' or 'audio_file' not in request.FILES:
         return JsonResponse({'error': 'WAV audio_file required.'}, status=400)
@@ -314,6 +332,7 @@ def decode_wav_api(request):
         ultrasonic = request.POST.get('ultrasonic', 'false').lower() == 'true'
         use_hamming = request.POST.get('use_hamming', 'true').lower() == 'true'
         use_rle = request.POST.get('use_rle', 'false').lower() == 'true'
+        passkey = request.POST.get('passkey', '').strip()
 
         wav_bytes = audio_file.read()
         with wave.open(io.BytesIO(wav_bytes), 'rb') as wf:
@@ -355,7 +374,18 @@ def decode_wav_api(request):
             if not header_info.get('valid'):
                 continue
 
+            seq = header_info['seq_num']
+            is_enc = header_info['is_encrypted']
             c_bits = header_info['content_bits']
+
+            key_valid = True
+            cipher_preview = ''
+            if is_enc:
+                dec_res = SourceCoder.decrypt_bits(c_bits, passkey, salt=seq)
+                key_valid = dec_res['key_valid']
+                c_bits = dec_res['plain_bits']
+                cipher_preview = dec_res['cipher_preview']
+
             if header_info['is_fax']:
                 valid_rle_len = (len(c_bits) // 8) * 8
                 rle_chunk = c_bits[:valid_rle_len]
@@ -363,29 +393,47 @@ def decode_wav_api(request):
                     continue
                 packets.append({
                     'msg_id': header_info['msg_id'],
-                    'seq_num': header_info['seq_num'],
+                    'seq_num': seq,
                     'is_last': header_info['is_last'],
                     'stream_mode': header_info['stream_mode'],
                     'is_fax': True,
+                    'is_encrypted': is_enc,
+                    'key_valid': key_valid,
                     'crc_corrupted': False,
-                    'word': '',
-                    'rle_chunk': rle_chunk
+                    'word': cipher_preview if not key_valid else '',
+                    'rle_chunk': rle_chunk if key_valid else '10101010' * 4
                 })
             else:
-                raw_word_bits = SourceCoder.rle_decode(c_bits) if use_rle else c_bits
-                word_text = SourceCoder.bits_to_text(raw_word_bits)
-                if not SourceCoder.is_clean_text(word_text):
-                    continue
-                packets.append({
-                    'msg_id': header_info['msg_id'],
-                    'seq_num': header_info['seq_num'],
-                    'is_last': header_info['is_last'],
-                    'stream_mode': header_info['stream_mode'],
-                    'is_fax': False,
-                    'crc_corrupted': False,
-                    'word': word_text,
-                    'rle_chunk': ''
-                })
+                if not key_valid:
+                    packets.append({
+                        'msg_id': header_info['msg_id'],
+                        'seq_num': seq,
+                        'is_last': header_info['is_last'],
+                        'stream_mode': header_info['stream_mode'],
+                        'is_fax': False,
+                        'is_encrypted': True,
+                        'key_valid': False,
+                        'crc_corrupted': False,
+                        'word': cipher_preview,
+                        'rle_chunk': ''
+                    })
+                else:
+                    raw_word_bits = SourceCoder.rle_decode(c_bits) if use_rle else c_bits
+                    word_text = SourceCoder.bits_to_text(raw_word_bits)
+                    if not SourceCoder.is_clean_text(word_text):
+                        continue
+                    packets.append({
+                        'msg_id': header_info['msg_id'],
+                        'seq_num': seq,
+                        'is_last': header_info['is_last'],
+                        'stream_mode': header_info['stream_mode'],
+                        'is_fax': False,
+                        'is_encrypted': is_enc,
+                        'key_valid': True,
+                        'crc_corrupted': False,
+                        'word': word_text,
+                        'rle_chunk': ''
+                    })
 
         if not packets:
             return JsonResponse({'status': 'error', 'error': 'No valid packet headers found.'})
@@ -393,14 +441,19 @@ def decode_wav_api(request):
         latest_msg_id = packets[-1]['msg_id']
         session_packets = [p for p in packets if p['msg_id'] == latest_msg_id]
         is_fax_session = session_packets[-1]['is_fax']
+        is_encrypted_session = session_packets[-1]['is_encrypted']
+        key_valid_session = all(p['key_valid'] for p in session_packets)
         stream_mode = session_packets[-1]['stream_mode']
         is_complete = any(p['is_last'] for p in session_packets)
 
         if is_fax_session:
             ordered_rle = {p['seq_num']: p['rle_chunk'] for p in session_packets}
             combined_rle = ''.join(ordered_rle[k] for k in sorted(ordered_rle.keys()))
-            decoded_fax_bits = SourceCoder.rle_decode(combined_rle)
-            assembled_text = f"[16x16 Fax Image: {len(decoded_fax_bits)}/256 pixels decoded]"
+            decoded_fax_bits = SourceCoder.rle_decode(combined_rle) if key_valid_session else ('10100101' * 32)
+            assembled_text = (
+                f"[16x16 Fax Image: {len(decoded_fax_bits)}/256 pixels decoded]"
+                if key_valid_session else "🔒 [Encrypted Fax: Invalid Passkey]"
+            )
         else:
             ordered_words = {p['seq_num']: p['word'] for p in session_packets}
             assembled_text = ' '.join(ordered_words[k] for k in sorted(ordered_words.keys()))
@@ -415,6 +468,8 @@ def decode_wav_api(request):
             'status': 'ok',
             'msg_id': latest_msg_id,
             'is_fax': is_fax_session,
+            'is_encrypted': is_encrypted_session,
+            'key_valid': key_valid_session,
             'fax_bits': decoded_fax_bits[:256],
             'stream_mode': stream_mode,
             'is_complete': is_complete,

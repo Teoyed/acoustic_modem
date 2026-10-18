@@ -49,6 +49,11 @@
         textarea { width: 100%; resize: none; padding: 14px 16px; background: var(--bg); border: 2px solid transparent; border-radius: 18px; color: var(--ink); font: 400 17px/1.5 var(--body); transition: border-color .15s, background .15s; }
         textarea::placeholder { color: #98a0bb; }
         textarea:focus { outline: none; background: #fff; border-color: var(--blue); }
+        .passkey-box { position: relative; display: flex; align-items: center; width: 100%; }
+        .passkey-box svg { position: absolute; left: 14px; width: 16px; height: 16px; color: var(--muted); pointer-events: none; }
+        .passkey-input { width: 100%; padding: 10px 14px 10px 38px; background: var(--bg); border: 2px solid transparent; border-radius: 99px; color: var(--ink); font: 500 13.5px var(--body); transition: border-color .15s, background .15s; }
+        .passkey-input::placeholder { color: #98a0bb; font-weight: 400; }
+        .passkey-input:focus { outline: none; background: #fff; border-color: var(--blue); }
         select { width: 100%; appearance: none; -webkit-appearance: none; padding: 10px 32px 10px 14px; background: var(--bg) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236b7391' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 12px center; border: 0; border-radius: 99px; color: var(--ink); font: 500 13.5px var(--body); cursor: pointer; }
         input[type=range], input[type=checkbox] { accent-color: var(--blue); }
         input[type=range] { width: 100%; }
@@ -208,6 +213,19 @@
                 </div>
             </div>
 
+            <!-- Presentation Layer: Encryption Passkey (Sender) -->
+            <div>
+                <label class="label" for="txPasskey">Encryption Passkey (Optional — OSI Layer 6)</label>
+                <div class="passkey-box">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                    </svg>
+                    <input id="txPasskey" type="password" autocomplete="off"
+                           placeholder="Leave empty for plaintext, or enter secret key..."
+                           class="passkey-input">
+                </div>
+            </div>
+
             <div class="opts">
                 <div>
                     <label class="label" for="levelsM">Speed</label>
@@ -266,6 +284,19 @@
                 </button>
             </div>
 
+            <!-- Presentation Layer: Decryption Passkey (Receiver) -->
+            <div style="align-self: stretch; text-align: left;">
+                <label class="label" for="rxPasskey">Encryption Passkey (Must match sender to unlock)</label>
+                <div class="passkey-box">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                    </svg>
+                    <input id="rxPasskey" type="password" autocomplete="off"
+                           placeholder="Enter decryption passkey if message is encrypted..."
+                           class="passkey-input" style="background: var(--card);">
+                </div>
+            </div>
+
             <div class="bubble">
                 <div class="bubble-head">
                     <span id="rxOutputHeader">Received message</span>
@@ -313,7 +344,7 @@
                     <div id="metricBer" class="metric-sub">BER: 0.0 | Retries: 0</div>
                 </div>
                 <div class="metric">
-                    <div class="metric-label">CRC-8 frame check</div>
+                    <div class="metric-label">CRC-8 &amp; Security</div>
                     <div id="metricCrc" class="metric-value">--</div>
                     <div id="metricFrameLen" class="metric-sub">Total stream: -- bits</div>
                 </div>
@@ -474,7 +505,6 @@
                 setTimeout(() => { ctx.close().catch(() => {}); }, 350);
             } catch (e) {}
 
-            // Update Receiver ARQ Bar UI
             const rxBar = document.getElementById('rxArqBar');
             const rxText = document.getElementById('rxArqText');
             const rxBadge = document.getElementById('rxArqBadge');
@@ -490,7 +520,6 @@
                 rxBadge.className = 'arq-pill badge-err';
             }
 
-            // Broadcast acoustic feedback event so Sender tab on same or adjacent window hears it
             syncChannel.postMessage({
                 type: 'ACOUSTIC_ARQ_FEEDBACK',
                 feedback: type,
@@ -499,7 +528,6 @@
             });
         }
 
-        // Sender Microphone Listener for 7000 Hz ACK / 3500 Hz NACK over the air
         async function startSenderArqMicWindow() {
             if (!document.getElementById('enableHybridArq').checked || senderArqListening) return;
             senderArqListening = true;
@@ -566,7 +594,7 @@
             const txArqText = document.getElementById('txArqText');
             const txArqBadge = document.getElementById('txArqBadge');
 
-            if (feedbackType === 'NACK' && arqRetryCount < 2 && pendingNackSeq !== null) {
+            if (feedbackType === 'NACK' && arqRetryCount < 1 && pendingNackSeq !== null) {
                 arqRetryCount++;
                 const retryIdx = pendingNackSeq;
                 pendingNackSeq = null;
@@ -576,7 +604,7 @@
 
                 setTimeout(() => {
                     runTransmission(retryIdx);
-                }, 550);
+                }, 600);
             } else if (feedbackType === 'ACK') {
                 txArqText.innerText = `Heard Acoustic ACK (${freqHz} Hz) — Delivery confirmed${arqRetryCount > 0 ? ' after ' + arqRetryCount + ' retry' : ''}!`;
                 txArqBadge.innerText = `ACK Verified (7kHz)`;
@@ -798,6 +826,8 @@
             }
 
             schedule.forEach((pkt) => {
+                // Attach sender passkey signature for local multi-window verification
+                pkt.tx_passkey = txData.tx_passkey || '';
                 const delayMs = Math.max(80, Math.round(pkt.emit_time_sec * 1000));
                 const timerId = setTimeout(() => {
                     if (!isRecording) return;
@@ -830,15 +860,28 @@
                 currentMsgComplete = false;
             }
 
+            // Presentation Layer: Verify Receiver Passkey if packet is encrypted
+            const rxKey = document.getElementById('rxPasskey').value.trim();
+            let keyMatches = true;
+            if (pkt.is_encrypted) {
+                if (pkt.key_valid !== undefined) {
+                    keyMatches = pkt.key_valid;
+                } else if (pkt.tx_passkey !== undefined) {
+                    keyMatches = (rxKey === pkt.tx_passkey);
+                }
+            }
+
             if (pkt.crc_corrupted) {
                 corruptedSeqSet.add(pkt.seq_num);
                 receivedWordMap[pkt.seq_num] = `[CRC-ERR #${pkt.seq_num}]`;
             } else {
                 corruptedSeqSet.delete(pkt.seq_num);
                 if (pkt.is_fax) {
-                    receivedRleMap[pkt.seq_num] = pkt.rle_chunk;
+                    receivedRleMap[pkt.seq_num] = keyMatches ? pkt.rle_chunk : '10100101'.repeat(4);
                 } else {
-                    receivedWordMap[pkt.seq_num] = pkt.word;
+                    receivedWordMap[pkt.seq_num] = keyMatches
+                        ? pkt.word
+                        : (pkt.cipher_preview || '🔒[ENCRYPTED]');
                 }
             }
 
@@ -849,23 +892,36 @@
             if (pkt.is_fax) {
                 const sortedSeqs = Object.keys(receivedRleMap).map(Number).sort((a, b) => a - b);
                 const accumulatedRle = sortedSeqs.map(k => receivedRleMap[k]).join('');
-                const decodedPixels = decodeClientRleBits(accumulatedRle);
+                const decodedPixels = keyMatches
+                    ? decodeClientRleBits(accumulatedRle)
+                    : '1010010101011010'.repeat(16);
                 const countLabel = totalExpectedWords > 0
                     ? `${sortedSeqs.length}/${totalExpectedWords}`
                     : `${sortedSeqs.length}`;
 
                 if (pkt.stream_mode || currentMsgComplete) {
                     renderReceiverFaxGrid(decodedPixels, currentMsgComplete && corruptedSeqSet.size === 0);
-                    document.getElementById('otaStatusText').innerText = currentMsgComplete
-                        ? `16×16 Pixel Fax complete (${countLabel} RLE packets decoded)!`
-                        : `Scanning live Fax lines (${decodedPixels.length}/256 pixels)...`;
-                    badge.innerText = currentMsgComplete ? 'Fax Complete (CRC-8 OK)' : `Fax Scan ${countLabel}`;
-                    badge.className = 'badge badge-ok';
+                    if (!keyMatches) {
+                        document.getElementById('otaStatusText').innerText =
+                            '🔒 Encrypted Fax received, but Decryption Passkey does not match!';
+                        badge.innerText = '🔒 Key Mismatch';
+                        badge.className = 'badge badge-err';
+                    } else {
+                        document.getElementById('otaStatusText').innerText = currentMsgComplete
+                            ? `16×16 Pixel Fax complete (${countLabel} RLE packets decoded)!`
+                            : `Scanning live Fax lines (${decodedPixels.length}/256 pixels)...`;
+                        badge.innerText = currentMsgComplete
+                            ? (pkt.is_encrypted ? '🔒 Decrypted & Verified' : 'Fax Complete (CRC-8 OK)')
+                            : `Fax Scan ${countLabel}`;
+                        badge.className = 'badge badge-ok';
+                    }
                 }
             } else {
                 document.getElementById('rxFaxWrapper').classList.add('hidden');
                 document.getElementById('otaDecodedText').classList.remove('hidden');
-                document.getElementById('rxOutputHeader').innerText = 'Received message';
+                document.getElementById('rxOutputHeader').innerText = pkt.is_encrypted
+                    ? 'Received Encrypted Message (OSI Layer 6)'
+                    : 'Received message';
 
                 const sortedSeqs = Object.keys(receivedWordMap).map(Number).sort((a, b) => a - b);
                 const fullSentenceSoFar = sortedSeqs.map(k => receivedWordMap[k]).join(' ');
@@ -880,6 +936,12 @@
                         `Burst Error on Packet #${badSeq}! Sending 3500 Hz NACK for Selective Repeat...`;
                     badge.innerText = `CRC Failed (#${badSeq}) -> NACK`;
                     badge.className = 'badge badge-err';
+                } else if (!keyMatches) {
+                    document.getElementById('otaDecodedText').innerText = fullSentenceSoFar;
+                    document.getElementById('otaStatusText').innerText =
+                        '🔒 Frame CRC-8 is valid, but Encryption Passkey is missing or incorrect!';
+                    badge.innerText = '🔒 Key Mismatch';
+                    badge.className = 'badge badge-err';
                 } else if (pkt.stream_mode || isRetransmission) {
                     document.getElementById('otaDecodedText').innerText =
                         currentMsgComplete ? fullSentenceSoFar : (fullSentenceSoFar + ' ...');
@@ -888,14 +950,18 @@
                         : (currentMsgComplete
                             ? `Message complete (${countLabel} packets decoded live at ${bitRateBps || 130} bps)!`
                             : `Streaming live word-by-word (${countLabel} decoded)...`);
-                    badge.innerText = isRetransmission ? 'ARQ Repaired (ACK)' : (currentMsgComplete ? 'Stream Complete (CRC-8 OK)' : `Packet ${countLabel} Live`);
+                    badge.innerText = isRetransmission
+                        ? 'ARQ Repaired (ACK)'
+                        : (currentMsgComplete
+                            ? (pkt.is_encrypted ? '🔓 Decrypted & CRC OK' : 'Stream Complete (CRC-8 OK)')
+                            : `Packet ${countLabel} Live`);
                     badge.className = 'badge badge-ok';
                 } else {
                     if (currentMsgComplete) {
                         document.getElementById('otaDecodedText').innerText = fullSentenceSoFar;
                         document.getElementById('otaStatusText').innerText =
                             `Full message received (${countLabel} blocks reassembled)!`;
-                        badge.innerText = 'Full Message Verified';
+                        badge.innerText = pkt.is_encrypted ? '🔓 Decrypted & Verified' : 'Full Message Verified';
                         badge.className = 'badge badge-ok';
                     } else {
                         document.getElementById('otaDecodedText').innerText =
@@ -906,7 +972,7 @@
                 }
             }
 
-            // Emit Acoustic ACK (7000 Hz) or NACK (3500 Hz) once per message/retry state
+            // Emit Acoustic ACK (7000 Hz) or NACK (3500 Hz) strictly ONCE per message/retry state
             if (pkt.is_last || isRetransmission) {
                 const isNackState = corruptedSeqSet.size > 0 && !isRetransmission;
                 const feedbackType = isNackState ? 'NACK' : 'ACK';
@@ -925,8 +991,9 @@
                 }
             }
 
+            const secLabel = pkt.is_encrypted ? (keyMatches ? ' | 🔓 Decrypted' : ' | 🔒 Locked') : '';
             document.getElementById('otaFecNote').innerText =
-                `Speed: ${bitRateBps || 130} bps | Hamming(7,4) Repaired: ${repairedCount} bit(s) | SNR: ${snrDb} dB`;
+                `Speed: ${bitRateBps || 130} bps | Hamming(7,4) Repaired: ${repairedCount} bit(s) | SNR: ${snrDb} dB${secLabel}`;
         }
 
         function broadcastSettings() {
@@ -1002,7 +1069,9 @@
                 `Nyquist (M=${m.levels_m || 4}): ${m.nyquist_max_bps} bps`;
             document.getElementById('metricFec').innerText = f.corrected_count + ' Bits Fixed';
             document.getElementById('metricBer').innerText = `BER: ${f.ber} | ARQ Retries: ${arqRetryCount}`;
-            document.getElementById('metricCrc').innerText = f.crc_passed ? 'Valid (Passed)' : 'Corrupted (NACK)';
+            document.getElementById('metricCrc').innerText = f.crc_passed
+                ? (data.is_encrypted ? 'CRC OK (🔒 Enc)' : 'Valid (Passed)')
+                : 'Corrupted (NACK)';
             document.getElementById('metricCrc').className = 'metric-value ' + (f.crc_passed ? 'ok' : 'bad');
             document.getElementById('metricFrameLen').innerText = `Total Stream: ${fr.total_frame_len} bits`;
 
@@ -1010,7 +1079,7 @@
                 ? ` | RLE: ${fr.rle_compressed_len}b (${fr.rle_saving_percent || 0}% saved)`
                 : '';
             document.getElementById('frameSummaryText').innerText =
-                `Data: ${fr.raw_bits_len} bits${rleNote} | CRC-8: ${fr.crc_bits} | Decoded: "${f.recovered_text}"`;
+                `Data: ${fr.raw_bits_len} bits${rleNote} | CRC-8: ${fr.crc_bits} | Output: "${f.recovered_text}"`;
 
             renderBitInspector(fr.tx_frame_bits, fr.rx_frame_bits, fr.flipped_indices);
 
@@ -1031,8 +1100,11 @@
                 pendingNackSeq = null;
             }
 
+            const txPasskey = document.getElementById('txPasskey').value.trim();
+
             const payload = {
                 payload_type: payloadMode,
+                passkey: txPasskey,
                 levels_m: parseInt(document.getElementById('levelsM').value),
                 delivery_mode: document.getElementById('deliveryMode').value,
                 ultrasonic: document.getElementById('carrierMode').value === 'ultrasonic',
@@ -1076,13 +1148,15 @@
                     return;
                 }
 
+                data.tx_passkey = txPasskey;
                 lastTxMsgId = data.msg_id;
                 pendingNackSeq = data.corrupted_seq;
 
                 document.getElementById('playerCard').classList.remove('hidden');
+                const encLabel = data.is_encrypted ? '🔒 Encrypted ' : '';
                 document.getElementById('playStatusLabel').innerText = isRetry
                     ? `Selective Repeat: Retransmitting Packet #${retransmitSeq} (${data.duration_sec}s)...`
-                    : `Transmitting ${data.packet_count} packet(s) at ${data.channel_metrics.actual_bit_rate_bps} bps (${data.duration_sec}s)...`;
+                    : `Transmitting ${encLabel}${data.packet_count} packet(s) at ${data.channel_metrics.actual_bit_rate_bps} bps (${data.duration_sec}s)...`;
 
                 const audioPlayer = document.getElementById('audioPlayer');
                 audioPlayer.onended = () => {
@@ -1183,7 +1257,7 @@
 
                 btn.classList.add('is-listening');
                 label.innerText = 'Stop';
-                statusText.innerText = 'Listening live (Hybrid ARQ ACK=7kHz / NACK=3.5kHz active)...';
+                statusText.innerText = 'Listening live (Hybrid ARQ & Layer-6 Decryption ready)...';
                 badge.innerText = 'Listening Live...';
                 badge.className = 'badge badge-live';
 
@@ -1312,6 +1386,7 @@
             formData.append('ultrasonic', document.getElementById('carrierMode').value === 'ultrasonic');
             formData.append('use_hamming', document.getElementById('useHamming').checked);
             formData.append('use_rle', document.getElementById('useRle').checked);
+            formData.append('passkey', document.getElementById('rxPasskey').value.trim());
 
             const badge = document.getElementById('otaCrcBadge');
             try {
