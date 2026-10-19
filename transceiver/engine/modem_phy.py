@@ -9,8 +9,8 @@ from .channel_coding import ChannelCoder
 class AcousticModemPHY:
     """
     Cross-Device Physical Layer (PHY) Acoustic Modem.
-    Features ISI Guard-Interval Windowing, Per-Carrier Spectral Equalization
-    for real laptop/phone microphones, and hardware-friendly Near-Ultrasonic frequencies.
+    Features ISI Guard-Interval Windowing, Per-Carrier Spectral Equalization,
+    Hybrid ARQ Feedback tones, and Dynamic Rate Adaptation based on SNR & BER.
     """
 
     SYMBOL_BITS_4FSK = ("00", "01", "10", "11")
@@ -31,14 +31,11 @@ class AcousticModemPHY:
         self.bits_per_symbol = int(math.log2(self.levels_m))
         self.bit_rate_bps = self.baud_rate * self.bits_per_symbol
 
-        # Cross-device acoustic frequencies tuned for phone/laptop speakers & mics
         if self.levels_m == 4:
             if ultrasonic:
-                # 14.4 - 16.2 kHz: Near-ultrasonic band that passes through mobile/laptop mics without roll-off
                 self.frequencies = [14400.0, 15000.0, 15600.0, 16200.0]
                 self.bandwidth = 2400.0
             else:
-                # 2.4 - 4.5 kHz: Sweet-spot audible band with flat mic response and low speech interference
                 self.frequencies = [2400.0, 3100.0, 3800.0, 4500.0]
                 self.bandwidth = 2600.0
         else:
@@ -54,7 +51,6 @@ class AcousticModemPHY:
         self.samples_per_symbol = int(self.sample_rate / self.baud_rate)
         self.samples_per_bit = self.samples_per_symbol
 
-        # Core 72% symbol integration window: strips 14% leading/trailing edges to eliminate room echo ISI
         self._guard_trim = max(2, int(self.samples_per_symbol * 0.14))
         self._core_len = max(16, self.samples_per_symbol - 2 * self._guard_trim)
 
@@ -129,16 +125,13 @@ class AcousticModemPHY:
         return buffer.getvalue()
 
     def _compute_symbol_powers(self, waveform: np.ndarray) -> np.ndarray:
-        """
-        Compute M-carrier energy matrix using only the ISI-free core of each symbol.
-        """
+        """Compute M-carrier energy matrix using only the ISI-free core of each symbol."""
         n_sym = len(waveform) // self.samples_per_symbol
         if n_sym == 0:
             return np.zeros((self.levels_m, 0), dtype=np.float32)
 
         trimmed = waveform[:n_sym * self.samples_per_symbol]
         full_matrix = trimmed.reshape(n_sym, self.samples_per_symbol)
-        # Slice out the center of each symbol to reject room reverberation (ISI) at edges
         core_matrix = full_matrix[:, self._guard_trim:self._guard_trim + self._core_len]
         norm = float(self._core_len ** 2)
 
@@ -177,10 +170,7 @@ class AcousticModemPHY:
         return waveform[start_sym * self.samples_per_symbol:end_sym * self.samples_per_symbol]
 
     def demodulate(self, received_waveform: np.ndarray) -> dict:
-        """
-        Non-coherent M-FSK demodulator with Per-Carrier Spectral Equalization
-        to compensate for microphone frequency roll-off on external devices.
-        """
+        """Non-coherent M-FSK demodulator with Per-Carrier Spectral Equalization."""
         powers = self._compute_symbol_powers(received_waveform)
         n_sym = powers.shape[1]
         if n_sym == 0:
@@ -191,8 +181,6 @@ class AcousticModemPHY:
                 "metrics": self.compute_channel_metrics(self.bandwidth, 1.0, self.levels_m)
             }
 
-        # Per-Carrier Spectral Equalization:
-        # Compensates when a laptop/phone speaker or mic attenuates higher frequencies (e.g., f3 vs f0)
         eq_powers = powers.copy()
         if n_sym >= 8:
             for m_idx in range(self.levels_m):
@@ -238,10 +226,7 @@ class AcousticModemPHY:
         }
 
     def demodulate_stream(self, received_waveform: np.ndarray, use_hamming: bool = True) -> dict:
-        """
-        Band-pass filter the recording and scan 20 sub-symbol timing phases
-        to lock onto over-the-air frames from external devices.
-        """
+        """Band-pass filter the recording and scan 20 sub-symbol timing phases."""
         if len(received_waveform) > 0:
             received_waveform = received_waveform - np.mean(received_waveform)
             received_waveform = self._apply_bandpass_filter(received_waveform)
@@ -326,3 +311,47 @@ class AcousticModemPHY:
             "actual_bit_rate_bps": effective_bit_rate,
             "spectral_efficiency_bps_hz": round(spectral_efficiency, 4)
         }
+
+    @staticmethod
+    def recommend_adaptive_profile(snr_db: float, ber: float = 0.0) -> dict:
+        """
+        Dynamic Rate Adaptation Engine (Slide 139):
+        Evaluates real-time link SNR (dB) and Bit Error Rate (BER) to select
+        the optimal modulation order (M=4 vs M=2), symbol rate (Baud), and FEC state.
+        """
+        if snr_db >= 16.0 and ber < 0.01:
+            return {
+                "state_code": "TURBO_4FSK",
+                "profile_name": "Turbo 4-FSK (High Speed)",
+                "channel_quality": "Excellent Link",
+                "recommended_levels_m": 4,
+                "recommended_baud_rate": 65,
+                "recommended_bps": 130,
+                "recommended_hamming": True,
+                "badge_style": "ok",
+                "reason": f"High SNR ({snr_db} dB) & low BER ({ber}) allow 4-level signaling (2 bits/sym) at 65 Baud."
+            }
+        elif snr_db >= 10.0 and ber < 0.035:
+            return {
+                "state_code": "BALANCED_4FSK",
+                "profile_name": "Balanced 4-FSK (Standard)",
+                "channel_quality": "Moderate Link",
+                "recommended_levels_m": 4,
+                "recommended_baud_rate": 45,
+                "recommended_bps": 90,
+                "recommended_hamming": True,
+                "badge_style": "live",
+                "reason": f"Moderate SNR ({snr_db} dB) — stepping symbol rate to 45 Baud with Hamming(7,4) FEC to prevent ISI."
+            }
+        else:
+            return {
+                "state_code": "ROBUST_2FSK",
+                "profile_name": "Robust 2-FSK (Noise-Resilient)",
+                "channel_quality": "Noisy / Degraded Link",
+                "recommended_levels_m": 2,
+                "recommended_baud_rate": 30,
+                "recommended_bps": 30,
+                "recommended_hamming": True,
+                "badge_style": "warn",
+                "reason": f"Low SNR ({snr_db} dB) or high BER ({ber}) detected! Downshifting to binary 2-FSK (M=2) @ 30 Baud + strong FEC."
+            }

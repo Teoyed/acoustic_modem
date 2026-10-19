@@ -174,7 +174,7 @@
         <header class="stage" id="stage">
             <h1>Say it with sound.</h1>
             <div class="bars" id="bars" aria-hidden="true"></div>
-            <div class="chip" id="headerBadgeText">44.1 kHz | 4-FSK Turbo Acoustic Link</div>
+            <div class="chip" id="headerBadgeText">44.1 kHz | 4-FSK (90 bps Effective Bit Rate)</div>
         </header>
 
         <!-- TAB 1: SEND -->
@@ -261,7 +261,7 @@
 
                 <!-- Hybrid ARQ Sender Feedback Status Bar -->
                 <div id="txArqBar" class="arq-bar">
-                    <span id="txArqText">Hybrid ARQ: Listening for ACK (7kHz) / NACK (3.5kHz) after playback</span>
+                    <span id="txArqText">Hybrid ARQ: Listening for ACK (6.8kHz) / NACK (3.4kHz) after playback</span>
                     <span id="txArqBadge" class="arq-pill badge-live">ARQ Armed</span>
                 </div>
             </div>
@@ -393,7 +393,7 @@
                         <label><input id="useHamming" type="checkbox" checked onchange="broadcastSettings()"> Hamming(7,4) FEC</label>
                         <label><input id="useRle" type="checkbox" onchange="broadcastSettings()"> RLE compression</label>
                         <label><input id="enableHybridArq" type="checkbox" checked> Hybrid ARQ (Auto-ACK/NACK)</label>
-                        <label title="Corrupts 1 packet on initial send so Receiver emits 3500 Hz NACK and Sender auto-retransmits!">
+                        <label title="Corrupts 1 packet on initial send so Receiver emits NACK and Sender auto-retransmits!">
                             <input id="simulateArqNack" type="checkbox"> Demo: Force NACK &amp; Retry
                         </label>
                     </div>
@@ -446,8 +446,8 @@
         let totalExpectedWords = 0;
 
         // Hybrid ARQ State
-        const ACK_FREQ_HZ = 7000;
-        const NACK_FREQ_HZ = 3500;
+        const ACK_FREQ_HZ = 6800;
+        const NACK_FREQ_HZ = 3400;
         let arqRetryCount = 0;
         let pendingNackSeq = null;
         let lastTxMsgId = null;
@@ -479,7 +479,7 @@
         };
 
         // ========================================================
-        // HYBRID ARQ: ACOUSTIC ACK (7000 Hz) & NACK (3500 Hz) TONES
+        // HYBRID ARQ: ACOUSTIC ACK (6800 Hz) & NACK (3400 Hz) TONES
         // ========================================================
         function playAcousticFeedbackTone(type, seqNum = 0) {
             if (!document.getElementById('enableHybridArq').checked) return;
@@ -534,7 +534,7 @@
 
             const txArqText = document.getElementById('txArqText');
             const txArqBadge = document.getElementById('txArqBadge');
-            txArqText.innerText = 'Listening on mic for Receiver ACK (7000 Hz) or NACK (3500 Hz)...';
+            txArqText.innerText = `Listening on mic for Receiver ACK (${ACK_FREQ_HZ} Hz) or NACK (${NACK_FREQ_HZ} Hz)...`;
             txArqBadge.innerText = 'Mic Listening (2s)';
             txArqBadge.className = 'arq-pill badge-live';
 
@@ -607,7 +607,7 @@
                 }, 600);
             } else if (feedbackType === 'ACK') {
                 txArqText.innerText = `Heard Acoustic ACK (${freqHz} Hz) — Delivery confirmed${arqRetryCount > 0 ? ' after ' + arqRetryCount + ' retry' : ''}!`;
-                txArqBadge.innerText = `ACK Verified (7kHz)`;
+                txArqBadge.innerText = `ACK Verified (6.8kHz)`;
                 txArqBadge.className = 'arq-pill badge-ok';
             }
         }
@@ -826,7 +826,6 @@
             }
 
             schedule.forEach((pkt) => {
-                // Attach sender passkey signature for local multi-window verification
                 pkt.tx_passkey = txData.tx_passkey || '';
                 const delayMs = Math.max(80, Math.round(pkt.emit_time_sec * 1000));
                 const timerId = setTimeout(() => {
@@ -933,7 +932,7 @@
                     const badSeq = Array.from(corruptedSeqSet)[0];
                     document.getElementById('otaDecodedText').innerText = fullSentenceSoFar;
                     document.getElementById('otaStatusText').innerText =
-                        `Burst Error on Packet #${badSeq}! Sending 3500 Hz NACK for Selective Repeat...`;
+                        `Burst Error on Packet #${badSeq}! Sending ${NACK_FREQ_HZ} Hz NACK for Selective Repeat...`;
                     badge.innerText = `CRC Failed (#${badSeq}) -> NACK`;
                     badge.className = 'badge badge-err';
                 } else if (!keyMatches) {
@@ -948,7 +947,7 @@
                     document.getElementById('otaStatusText').innerText = isRetransmission
                         ? `Retransmitted Packet #${pkt.seq_num} repaired via Selective Repeat ARQ!`
                         : (currentMsgComplete
-                            ? `Message complete (${countLabel} packets decoded live at ${bitRateBps || 130} bps)!`
+                            ? `Message complete (${countLabel} packets decoded live at ${bitRateBps || 90} bps)!`
                             : `Streaming live word-by-word (${countLabel} decoded)...`);
                     badge.innerText = isRetransmission
                         ? 'ARQ Repaired (ACK)'
@@ -972,7 +971,7 @@
                 }
             }
 
-            // Emit Acoustic ACK (7000 Hz) or NACK (3500 Hz) strictly ONCE per message/retry state
+            // Emit Acoustic ACK (6800 Hz) or NACK (3400 Hz) strictly ONCE per message/retry state
             if (pkt.is_last || isRetransmission) {
                 const isNackState = corruptedSeqSet.size > 0 && !isRetransmission;
                 const feedbackType = isNackState ? 'NACK' : 'ACK';
@@ -993,7 +992,7 @@
 
             const secLabel = pkt.is_encrypted ? (keyMatches ? ' | 🔓 Decrypted' : ' | 🔒 Locked') : '';
             document.getElementById('otaFecNote').innerText =
-                `Speed: ${bitRateBps || 130} bps | Hamming(7,4) Repaired: ${repairedCount} bit(s) | SNR: ${snrDb} dB${secLabel}`;
+                `Speed: ${bitRateBps || 90} bps | Hamming(7,4) Repaired: ${repairedCount} bit(s) | SNR: ${snrDb} dB${secLabel}`;
         }
 
         function broadcastSettings() {
@@ -1063,7 +1062,7 @@
 
             document.getElementById('metricSnr').innerText = m.snr_db + ' dB';
             document.getElementById('metricBitRate').innerText =
-                `${m.levels_m || 4}-FSK Rate: ${m.actual_bit_rate_bps} bps (${m.symbol_rate_baud || 65} Bd)`;
+                `${m.levels_m || 4}-FSK Rate: ${m.actual_bit_rate_bps} bps (${m.symbol_rate_baud || 45} Bd)`;
             document.getElementById('metricShannon').innerText = m.shannon_capacity_bps + ' bps';
             document.getElementById('metricNyquist').innerText =
                 `Nyquist (M=${m.levels_m || 4}): ${m.nyquist_max_bps} bps`;
@@ -1257,7 +1256,7 @@
 
                 btn.classList.add('is-listening');
                 label.innerText = 'Stop';
-                statusText.innerText = 'Listening live (Hybrid ARQ & Layer-6 Decryption ready)...';
+                statusText.innerText = 'Listening live (Multi-Band Auto-Detect, ARQ & Decryption ready)...';
                 badge.innerText = 'Listening Live...';
                 badge.className = 'badge badge-live';
 
@@ -1394,7 +1393,7 @@
                 const data = await res.json();
 
                 if (data.status === 'ok' && data.packets && data.packets.length > 0) {
-                    totalExpectedWords = 0;
+                    totalExpectedWords = 0; // Allow any packet sequence from an external physical device
                     for (const pkt of data.packets) {
                         applyIncomingPacketToReceiverUI(
                             pkt,
@@ -1405,6 +1404,7 @@
                     }
                     updateSignalLabUI(data);
                     syncChannel.postMessage({ type: 'SIGNAL_LAB_UPDATE', payload: data });
+
                     if (forceReveal && data.is_fax && data.fax_bits) {
                         renderReceiverFaxGrid(data.fax_bits, true);
                     } else if (forceReveal && !data.is_fax) {
