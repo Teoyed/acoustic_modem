@@ -6,10 +6,10 @@ class ChannelCoder:
     """
     Channel Coding and Data Link Layer Framing module.
     Includes CRC-8 error detection, Hamming(7,4) Forward Error Correction (FEC),
-    HDLC framing with shared flags, packet sequence headers (Text, Fax & Encryption),
-    and channel error injection.
+    HDLC framing with shared flags, packet sequence headers, and error injection.
     """
-    PREAMBLE = "10101010"      # 1-byte alternating preamble for receiver synchronization
+    # 24-bit alternating preamble so physical microphones settle AGC and lock symbol phase
+    PREAMBLE = "101010101010101010101010"
     HDLC_FLAG = "01111110"     # Standard HDLC frame delimiter flag (0x7E)
     CRC8_POLY = "100000111"    # Standard CRC-8 generator polynomial (x^8 + x^2 + x + 1)
 
@@ -148,15 +148,7 @@ class ChannelCoder:
         is_fax: bool = False,
         is_encrypted: bool = False
     ) -> str:
-        """
-        Build a 12-bit Data Link packet header:
-        - Bits 0..2 (3 bits) : Message Session ID (1..7)
-        - Bit 3     (1 bit)  : Delivery Mode (1 = Live Stream, 0 = Full at End)
-        - Bit 4     (1 bit)  : Last Packet Flag (1 = Final frame, 0 = More follow)
-        - Bit 5     (1 bit)  : Payload Type (1 = 16x16 RLE Fax Image, 0 = UTF-8 Text)
-        - Bit 6     (1 bit)  : Encryption Flag (1 = Passkey Encrypted, 0 = Plaintext)
-        - Bits 7..11(5 bits) : Sequence Number (0..31)
-        """
+        """Build a 12-bit Data Link packet header."""
         msg_id_bits = f"{msg_id & 0x07:03b}"
         mode_bit = '1' if stream_mode else '0'
         last_bit = '1' if is_last else '0'
@@ -227,22 +219,28 @@ class ChannelCoder:
 
     @classmethod
     def build_shared_flag_stream(cls, payloads: list[str], use_hamming: bool = True) -> dict:
-        """Build a back-to-back HDLC frame stream using Flag Sharing."""
+        """
+        Build a multi-packet HDLC stream where each word packet has Double Flags
+        (`0111111001111110`) between packets to give physical speakers/mics
+        extra resynchronization margin against room echo (ISI).
+        """
         bodies = []
         cumulative_bits = []
         current_len = len(cls.PREAMBLE) + len(cls.HDLC_FLAG)
         first_crc = "00000000"
+        double_flag = cls.HDLC_FLAG + cls.HDLC_FLAG
 
         for idx, p_bits in enumerate(payloads):
             b_info = cls.encode_frame_body(p_bits, use_hamming=use_hamming)
             if idx == 0:
                 first_crc = b_info["crc_bits"]
             bodies.append(b_info["stuffed_body"])
-            current_len += len(b_info["stuffed_body"]) + len(cls.HDLC_FLAG)
+            sep_len = len(double_flag) if idx < len(payloads) - 1 else len(cls.HDLC_FLAG)
+            current_len += len(b_info["stuffed_body"]) + sep_len
             cumulative_bits.append(current_len)
 
-        stream_bits = cls.PREAMBLE + cls.HDLC_FLAG + cls.HDLC_FLAG.join(bodies) + cls.HDLC_FLAG
-        first_single_frame = f"{cls.PREAMBLE}{cls.HDLC_FLAG}{bodies[0]}{cls.HDLC_FLAG}" if bodies else ""
+        stream_bits = cls.PREAMBLE + cls.HDLC_FLAG + double_flag.join(bodies) + cls.HDLC_FLAG + cls.PREAMBLE[:8]
+        first_single_frame = f"{cls.PREAMBLE[:8]}{cls.HDLC_FLAG}{bodies[0]}{cls.HDLC_FLAG}" if bodies else ""
 
         return {
             "stream_bits": stream_bits,
@@ -281,7 +279,7 @@ class ChannelCoder:
                 continue
             body_start = flag_positions[idx] + flag_len
 
-            for end_idx in range(idx + 1, min(idx + 4, len(flag_positions))):
+            for end_idx in range(idx + 1, min(idx + 5, len(flag_positions))):
                 body_end = flag_positions[end_idx]
                 stuffed_body = received_frame_bits[body_start:body_end]
                 if len(stuffed_body) < 28:

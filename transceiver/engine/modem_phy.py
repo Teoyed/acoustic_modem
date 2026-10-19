@@ -8,19 +8,19 @@ from .channel_coding import ChannelCoder
 
 class AcousticModemPHY:
     """
-    Noise-Immune Physical Layer (PHY) Acoustic Modem with Hybrid ARQ support.
-    Uses a High-Clarity Audible Band (4.2 kHz - 6.0 kHz), FFT Band-Pass Filtering,
-    Tone-Dominance Gating, and Acoustic ACK (7000 Hz) / NACK (3500 Hz) tone synthesis.
+    Cross-Device Physical Layer (PHY) Acoustic Modem.
+    Features ISI Guard-Interval Windowing, Per-Carrier Spectral Equalization
+    for real laptop/phone microphones, and hardware-friendly Near-Ultrasonic frequencies.
     """
 
     SYMBOL_BITS_4FSK = ("00", "01", "10", "11")
-    ACK_FREQ_HZ = 7000.0
-    NACK_FREQ_HZ = 3500.0
+    ACK_FREQ_HZ = 6800.0
+    NACK_FREQ_HZ = 3400.0
 
     def __init__(
         self,
         sample_rate: int = 44100,
-        baud_rate: int = 65,
+        baud_rate: int = 45,
         ultrasonic: bool = False,
         levels_m: int = 4
     ):
@@ -31,19 +31,22 @@ class AcousticModemPHY:
         self.bits_per_symbol = int(math.log2(self.levels_m))
         self.bit_rate_bps = self.baud_rate * self.bits_per_symbol
 
+        # Cross-device acoustic frequencies tuned for phone/laptop speakers & mics
         if self.levels_m == 4:
             if ultrasonic:
-                self.frequencies = [16800.0, 17400.0, 18000.0, 18600.0]
+                # 14.4 - 16.2 kHz: Near-ultrasonic band that passes through mobile/laptop mics without roll-off
+                self.frequencies = [14400.0, 15000.0, 15600.0, 16200.0]
                 self.bandwidth = 2400.0
             else:
-                self.frequencies = [4200.0, 4800.0, 5400.0, 6000.0]
-                self.bandwidth = 2400.0
+                # 2.4 - 4.5 kHz: Sweet-spot audible band with flat mic response and low speech interference
+                self.frequencies = [2400.0, 3100.0, 3800.0, 4500.0]
+                self.bandwidth = 2600.0
         else:
             if ultrasonic:
-                self.frequencies = [17500.0, 18500.0]
+                self.frequencies = [14800.0, 15800.0]
                 self.bandwidth = 2000.0
             else:
-                self.frequencies = [4500.0, 5700.0]
+                self.frequencies = [2600.0, 3800.0]
                 self.bandwidth = 2000.0
 
         self.f0 = self.frequencies[0]
@@ -51,24 +54,33 @@ class AcousticModemPHY:
         self.samples_per_symbol = int(self.sample_rate / self.baud_rate)
         self.samples_per_bit = self.samples_per_symbol
 
-        t = np.arange(self.samples_per_symbol, dtype=np.float32) / self.sample_rate
-        self._cos_bank = [np.cos(2.0 * np.pi * f * t) for f in self.frequencies]
-        self._sin_bank = [np.sin(2.0 * np.pi * f * t) for f in self.frequencies]
+        # Core 72% symbol integration window: strips 14% leading/trailing edges to eliminate room echo ISI
+        self._guard_trim = max(2, int(self.samples_per_symbol * 0.14))
+        self._core_len = max(16, self.samples_per_symbol - 2 * self._guard_trim)
+
+        t_core = np.arange(self._core_len, dtype=np.float32) / self.sample_rate
+        hann_core = np.hanning(self._core_len).astype(np.float32)
+        self._cos_bank = [np.cos(2.0 * np.pi * f * t_core) * hann_core for f in self.frequencies]
+        self._sin_bank = [np.sin(2.0 * np.pi * f * t_core) * hann_core for f in self.frequencies]
 
     def _apply_bandpass_filter(self, waveform: np.ndarray) -> np.ndarray:
-        """Sharp FFT Band-Pass Filter to remove human voice and out-of-band noise."""
+        """Sharp FFT Band-Pass Filter + Automatic Gain Normalization (AGC)."""
         n = len(waveform)
         if n < self.samples_per_symbol:
             return waveform
 
-        low_cut = min(self.frequencies) - 350.0
-        high_cut = max(self.frequencies) + 350.0
+        low_cut = min(self.frequencies) - 400.0
+        high_cut = max(self.frequencies) + 400.0
 
         spectrum = np.fft.rfft(waveform)
         freqs = np.fft.rfftfreq(n, d=1.0 / self.sample_rate)
         mask = (freqs >= low_cut) & (freqs <= high_cut)
-        filtered = np.fft.irfft(spectrum * mask, n=n)
-        return filtered.astype(np.float32)
+        filtered = np.fft.irfft(spectrum * mask, n=n).astype(np.float32)
+
+        peak = float(np.max(np.abs(filtered)))
+        if peak > 1e-5:
+            filtered = filtered / peak
+        return filtered
 
     def modulate(self, bits: str) -> np.ndarray:
         """Modulate a binary bit string into a continuous-phase M-FSK waveform."""
@@ -103,7 +115,7 @@ class AcousticModemPHY:
             waveform[start:start + self.samples_per_symbol] = symbol_wave
             phase = (phase + 2.0 * np.pi * freq * self.samples_per_symbol * t_step) % (2.0 * np.pi)
 
-        return waveform * 0.85
+        return waveform * 0.90
 
     def waveform_to_wav_bytes(self, waveform: np.ndarray) -> bytes:
         """Convert normalized float32 waveform into 16-bit mono PCM WAV bytes."""
@@ -116,21 +128,34 @@ class AcousticModemPHY:
             wav_file.writeframes(pcm_int16.tobytes())
         return buffer.getvalue()
 
-    def _isolate_carrier_burst(self, waveform: np.ndarray) -> np.ndarray:
-        """Isolate the active M-FSK signal burst when narrowband carrier tones dominate."""
+    def _compute_symbol_powers(self, waveform: np.ndarray) -> np.ndarray:
+        """
+        Compute M-carrier energy matrix using only the ISI-free core of each symbol.
+        """
         n_sym = len(waveform) // self.samples_per_symbol
-        if n_sym < 6:
-            return np.array([], dtype=np.float32)
+        if n_sym == 0:
+            return np.zeros((self.levels_m, 0), dtype=np.float32)
 
         trimmed = waveform[:n_sym * self.samples_per_symbol]
-        matrix = trimmed.reshape(n_sym, self.samples_per_symbol)
-        norm = float(self.samples_per_symbol ** 2)
+        full_matrix = trimmed.reshape(n_sym, self.samples_per_symbol)
+        # Slice out the center of each symbol to reject room reverberation (ISI) at edges
+        core_matrix = full_matrix[:, self._guard_trim:self._guard_trim + self._core_len]
+        norm = float(self._core_len ** 2)
 
         powers = np.zeros((self.levels_m, n_sym), dtype=np.float32)
         for m_idx in range(self.levels_m):
             c_vec = self._cos_bank[m_idx]
             s_vec = self._sin_bank[m_idx]
-            powers[m_idx] = ((matrix @ c_vec) ** 2 + (matrix @ s_vec) ** 2) / norm
+            powers[m_idx] = ((core_matrix @ c_vec) ** 2 + (core_matrix @ s_vec) ** 2) / norm
+
+        return powers
+
+    def _isolate_carrier_burst(self, waveform: np.ndarray) -> np.ndarray:
+        """Isolate the active M-FSK signal burst from microphone audio."""
+        powers = self._compute_symbol_powers(waveform)
+        n_sym = powers.shape[1]
+        if n_sym < 6:
+            return np.array([], dtype=np.float32)
 
         max_tone_power = np.max(powers, axis=0)
         total_power = np.sum(powers, axis=0)
@@ -138,22 +163,26 @@ class AcousticModemPHY:
         dominance_ratio = max_tone_power / np.maximum(other_power, 1e-10)
 
         peak_power = float(np.max(max_tone_power))
-        if peak_power < 1e-6:
+        if peak_power < 1e-7:
             return np.array([], dtype=np.float32)
 
-        valid_tone_mask = (max_tone_power > peak_power * 0.08) & (dominance_ratio > 2.2)
+        valid_tone_mask = (max_tone_power > peak_power * 0.04) & (dominance_ratio > 1.45)
         active_idx = np.where(valid_tone_mask)[0]
 
-        if len(active_idx) < 8:
+        if len(active_idx) < 6:
             return np.array([], dtype=np.float32)
 
-        start_sym = max(0, int(active_idx[0]) - 4)
-        end_sym = min(n_sym, int(active_idx[-1]) + 5)
+        start_sym = max(0, int(active_idx[0]) - 6)
+        end_sym = min(n_sym, int(active_idx[-1]) + 6)
         return waveform[start_sym * self.samples_per_symbol:end_sym * self.samples_per_symbol]
 
     def demodulate(self, received_waveform: np.ndarray) -> dict:
-        """Fast vectorized non-coherent M-FSK demodulator with Tone-Dominance gating."""
-        n_sym = len(received_waveform) // self.samples_per_symbol
+        """
+        Non-coherent M-FSK demodulator with Per-Carrier Spectral Equalization
+        to compensate for microphone frequency roll-off on external devices.
+        """
+        powers = self._compute_symbol_powers(received_waveform)
+        n_sym = powers.shape[1]
         if n_sym == 0:
             return {
                 "bits": "",
@@ -162,37 +191,32 @@ class AcousticModemPHY:
                 "metrics": self.compute_channel_metrics(self.bandwidth, 1.0, self.levels_m)
             }
 
-        trimmed = received_waveform[:n_sym * self.samples_per_symbol]
-        matrix = trimmed.reshape(n_sym, self.samples_per_symbol)
-        norm = float(self.samples_per_symbol ** 2)
+        # Per-Carrier Spectral Equalization:
+        # Compensates when a laptop/phone speaker or mic attenuates higher frequencies (e.g., f3 vs f0)
+        eq_powers = powers.copy()
+        if n_sym >= 8:
+            for m_idx in range(self.levels_m):
+                tone_ref = float(np.percentile(powers[m_idx], 85))
+                if tone_ref > 1e-8:
+                    eq_powers[m_idx] = powers[m_idx] / tone_ref
 
-        powers = np.zeros((self.levels_m, n_sym), dtype=np.float32)
-        for m_idx in range(self.levels_m):
-            c_vec = self._cos_bank[m_idx]
-            s_vec = self._sin_bank[m_idx]
-            powers[m_idx] = ((matrix @ c_vec) ** 2 + (matrix @ s_vec) ** 2) / norm
+        total_raw_p = np.sum(powers, axis=0)
+        peak_raw_p = float(np.max(total_raw_p)) if len(total_raw_p) > 0 else 0.0
+        squelch_threshold = peak_raw_p * 0.025
 
-        total_p = np.sum(powers, axis=0)
-        peak_p = float(np.max(total_p)) if len(total_p) > 0 else 0.0
-        squelch_threshold = peak_p * 0.05
-
-        best_tone_indices = np.argmax(powers, axis=0)
+        best_tone_indices = np.argmax(eq_powers, axis=0)
         detected_chunks = []
         signal_powers = []
         noise_powers = []
 
         for i in range(n_sym):
-            if total_p[i] < squelch_threshold:
+            if total_raw_p[i] < squelch_threshold:
                 detected_chunks.append("00" if self.levels_m == 4 else "0")
                 continue
 
             winner = int(best_tone_indices[i])
             win_power = float(powers[winner, i])
-            other_power = float(total_p[i] - win_power) / max(1, self.levels_m - 1)
-
-            if win_power < other_power * 1.8:
-                detected_chunks.append("00" if self.levels_m == 4 else "0")
-                continue
+            other_power = float(total_raw_p[i] - win_power) / max(1, self.levels_m - 1)
 
             signal_powers.append(win_power)
             noise_powers.append(max(other_power, 1e-12))
@@ -215,15 +239,15 @@ class AcousticModemPHY:
 
     def demodulate_stream(self, received_waveform: np.ndarray, use_hamming: bool = True) -> dict:
         """
-        Band-pass filter the recording and strictly extract CRC-8 verified frames
-        across 16 timing phases so out-of-phase noise never creates bogus NACK packets.
+        Band-pass filter the recording and scan 20 sub-symbol timing phases
+        to lock onto over-the-air frames from external devices.
         """
         if len(received_waveform) > 0:
             received_waveform = received_waveform - np.mean(received_waveform)
             received_waveform = self._apply_bandpass_filter(received_waveform)
 
         active_wave = self._isolate_carrier_burst(received_waveform)
-        if len(active_wave) < self.samples_per_symbol * 10:
+        if len(active_wave) < self.samples_per_symbol * 8:
             empty_demod = self.demodulate(np.array([], dtype=np.float32))
             return {
                 "valid_frames": [],
@@ -235,7 +259,7 @@ class AcousticModemPHY:
         collected_by_seq = {}
         best_metrics = None
 
-        num_phases = 16
+        num_phases = 20
         step = max(1, self.samples_per_symbol // num_phases)
 
         for phase_idx in range(num_phases):
@@ -248,7 +272,7 @@ class AcousticModemPHY:
             if best_metrics is None:
                 best_metrics = demod_candidate["metrics"]
 
-            if demod_candidate["metrics"]["snr_db"] < 4.5:
+            if demod_candidate["metrics"]["snr_db"] < 2.0:
                 continue
 
             bit_candidates = [demod_candidate["bits"]]
@@ -256,8 +280,6 @@ class AcousticModemPHY:
                 bit_candidates.append(demod_candidate["bits"][1:])
 
             for cand_bits in bit_candidates:
-                # Strictly accept only CRC-8 verified frames from live microphone audio
-                # to prevent out-of-phase sub-symbol alignments from generating fake NACKs!
                 frames = ChannelCoder.parse_all_frames(
                     cand_bits,
                     use_hamming=use_hamming,

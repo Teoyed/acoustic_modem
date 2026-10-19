@@ -378,8 +378,8 @@
                 </div>
                 <div class="sliders">
                     <div>
-                        <label for="baudRate">Symbol rate: <b><span id="baudValue">65</span> baud</b></label>
-                        <input id="baudRate" type="range" min="25" max="110" step="5" value="65"
+                        <label for="baudRate">Symbol rate: <b><span id="baudValue">45</span> baud</b></label>
+                        <input id="baudRate" type="range" min="25" max="90" step="5" value="45"
                                oninput="document.getElementById('baudValue').innerText = this.value; broadcastSettings();">
                     </div>
                     <div>
@@ -1394,6 +1394,7 @@
                 const data = await res.json();
 
                 if (data.status === 'ok' && data.packets && data.packets.length > 0) {
+                    totalExpectedWords = 0;
                     for (const pkt of data.packets) {
                         applyIncomingPacketToReceiverUI(
                             pkt,
@@ -1402,6 +1403,8 @@
                             data.metrics.actual_bit_rate_bps
                         );
                     }
+                    updateSignalLabUI(data);
+                    syncChannel.postMessage({ type: 'SIGNAL_LAB_UPDATE', payload: data });
                     if (forceReveal && data.is_fax && data.fax_bits) {
                         renderReceiverFaxGrid(data.fax_bits, true);
                     } else if (forceReveal && !data.is_fax) {

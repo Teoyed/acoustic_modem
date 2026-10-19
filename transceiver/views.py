@@ -48,8 +48,7 @@ def dashboard_view(request):
 @csrf_exempt
 def transmit_and_analyze_api(request):
     """
-    End-to-End Transmission Pipeline with Presentation Layer Encryption,
-    RLE Compression, Hamming(7,4) FEC, CRC-8, Shared-Flag HDLC, and M-FSK.
+    End-to-End Transmission Pipeline optimized for cross-device acoustic links.
     """
     if request.method != 'POST':
         return JsonResponse({'error': 'POST request required.'}, status=405)
@@ -60,7 +59,7 @@ def transmit_and_analyze_api(request):
         text = data.get('text', '').strip() or 'Hello UoM!'
         passkey = data.get('passkey', '').strip()
         fax_matrix = data.get('fax_matrix', None)
-        baud_rate = int(data.get('baud_rate', 65))
+        baud_rate = int(data.get('baud_rate', 45))
         levels_m = int(data.get('levels_m', 4))
         ultrasonic = bool(data.get('ultrasonic', False))
         delivery_mode = data.get('delivery_mode', 'stream')
@@ -150,7 +149,6 @@ def transmit_and_analyze_api(request):
                 total_raw_bits += len(c_bits)
                 total_rle_bits += rle_stats['compressed_len']
 
-                # Presentation Layer Encryption (before HDLC framing)
                 protected_chunk = SourceCoder.encrypt_bits(encoded_bits, passkey, salt=idx) if is_encrypted else encoded_bits
 
                 header_bits = ChannelCoder.pack_packet_header(
@@ -176,22 +174,10 @@ def transmit_and_analyze_api(request):
         if simulate_arq_nack and retransmit_seq is None and len(payloads) > 0:
             corrupt_target_idx = min(1, len(payloads) - 1)
 
-        bodies = []
-        cumulative_bits = []
-        current_len = len(ChannelCoder.PREAMBLE) + len(ChannelCoder.HDLC_FLAG)
-        first_crc = "00000000"
-
-        for idx, p_bits in enumerate(payloads):
-            b_info = ChannelCoder.encode_frame_body(p_bits, use_hamming=use_hamming)
-            if idx == 0:
-                first_crc = b_info["crc_bits"]
-            stuffed = b_info["stuffed_body"]
-            bodies.append(stuffed)
-            current_len += len(stuffed) + len(ChannelCoder.HDLC_FLAG)
-            cumulative_bits.append(current_len)
-
-        stream_bits = ChannelCoder.PREAMBLE + ChannelCoder.HDLC_FLAG + ChannelCoder.HDLC_FLAG.join(bodies) + ChannelCoder.HDLC_FLAG
-        first_tx_bits = f"{ChannelCoder.PREAMBLE}{ChannelCoder.HDLC_FLAG}{bodies[0]}{ChannelCoder.HDLC_FLAG}"
+        stream_info = ChannelCoder.build_shared_flag_stream(payloads, use_hamming=use_hamming)
+        stream_bits = stream_info['stream_bits']
+        first_tx_bits = stream_info['first_frame_bits']
+        first_crc = stream_info['first_crc']
 
         modem = AcousticModemPHY(
             sample_rate=44100,
@@ -206,7 +192,7 @@ def transmit_and_analyze_api(request):
         effective_bps = modem.bit_rate_bps
         packet_schedule = []
         for idx, item_val in enumerate(packet_items):
-            emit_sec = round(cumulative_bits[idx] / effective_bps, 3)
+            emit_sec = round(stream_info['cumulative_bits'][idx] / effective_bps, 3)
             is_corrupted_pkt = (corrupt_target_idx is not None and idx == corrupt_target_idx)
             c_bits_val = cipher_bits_items[idx]
             packet_schedule.append({
@@ -234,7 +220,7 @@ def transmit_and_analyze_api(request):
         rx_bits = demod_res['bits'][:len(first_tx_bits)]
 
         flipped_indices = []
-        header_offset = len(ChannelCoder.PREAMBLE) + len(ChannelCoder.HDLC_FLAG)
+        header_offset = 16
         effective_error_mode = 'burst' if corrupt_target_idx == 0 else error_mode
         if effective_error_mode in ('single', 'multiple', 'burst') and len(rx_bits) > header_offset + 8:
             body = rx_bits[header_offset:-len(ChannelCoder.HDLC_FLAG)]
@@ -319,17 +305,19 @@ def transmit_and_analyze_api(request):
 @csrf_exempt
 def decode_wav_api(request):
     """
-    Demodulate a live microphone snapshot or uploaded WAV file, verify CRC-8 & Hamming(7,4),
-    and decrypt the payload using the Receiver's Presentation Layer passkey.
+    Cross-Device Multi-Band Demodulator:
+    Automatically scans the requested configuration first, and if no frames are found
+    (e.g., when a second laptop/phone transmits in Ultrasonic or 2-FSK without UI sync),
+    automatically probes alternative bands (Audible/Ultrasonic, 4-FSK/2-FSK) to lock on!
     """
     if request.method != 'POST' or 'audio_file' not in request.FILES:
         return JsonResponse({'error': 'WAV audio_file required.'}, status=400)
 
     try:
         audio_file = request.FILES['audio_file']
-        baud_rate = int(request.POST.get('baud_rate', 65))
-        levels_m = int(request.POST.get('levels_m', 4))
-        ultrasonic = request.POST.get('ultrasonic', 'false').lower() == 'true'
+        req_baud = int(request.POST.get('baud_rate', 45))
+        req_levels = int(request.POST.get('levels_m', 4))
+        req_ultra = request.POST.get('ultrasonic', 'false').lower() == 'true'
         use_hamming = request.POST.get('use_hamming', 'true').lower() == 'true'
         use_rle = request.POST.get('use_rle', 'false').lower() == 'true'
         passkey = request.POST.get('passkey', '').strip()
@@ -341,14 +329,43 @@ def decode_wav_api(request):
             raw_pcm = wf.readframes(n_frames)
             waveform = np.frombuffer(raw_pcm, dtype=np.int16).astype(np.float32) / 32768.0
 
-        modem = AcousticModemPHY(
-            sample_rate=sample_rate,
-            baud_rate=baud_rate,
-            ultrasonic=ultrasonic,
-            levels_m=levels_m
-        )
-        stream_res = modem.demodulate_stream(waveform, use_hamming=use_hamming)
-        valid_frames = stream_res['valid_frames']
+        # Probe priority list: try user's current UI setting first, then auto-detect other bands
+        probe_configs = [
+            (req_baud, req_levels, req_ultra),
+            (req_baud, req_levels, not req_ultra),
+            (45, 4, False),
+            (45, 4, True),
+            (45, 2, False),
+            (45, 2, True),
+            (65, 4, False),
+        ]
+        seen_configs = set()
+        valid_frames = []
+        modem = None
+        stream_res = None
+
+        for b_rate, lvl_m, is_ult in probe_configs:
+            cfg = (b_rate, lvl_m, is_ult)
+            if cfg in seen_configs:
+                continue
+            seen_configs.add(cfg)
+
+            candidate_modem = AcousticModemPHY(
+                sample_rate=sample_rate,
+                baud_rate=b_rate,
+                ultrasonic=is_ult,
+                levels_m=lvl_m
+            )
+            res = candidate_modem.demodulate_stream(waveform, use_hamming=use_hamming)
+            if modem is None:
+                modem = candidate_modem
+                stream_res = res
+            if res['valid_frames']:
+                modem = candidate_modem
+                stream_res = res
+                valid_frames = res['valid_frames']
+                break
+
         metrics = stream_res['metrics']
 
         if not valid_frames:
